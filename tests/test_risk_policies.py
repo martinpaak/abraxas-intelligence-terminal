@@ -145,6 +145,38 @@ class RiskPolicyTests(unittest.TestCase):
         self.assertFalse(bot_check["passed"])
         self.assertTrue(account_check["passed"])
 
+    def test_bot_position_budget_is_isolated_from_other_bots(self) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with connect() as connection:
+            connection.execute(
+                """INSERT INTO bots (id, name, description, status, mode, base_symbol, timeframe,
+                risk_profile, created_at, updated_at)
+                VALUES (2, 'Second Risk Bot', 'fixture', 'active', 'paper', 'BTCUSDT', '15m', 'strict', ?, ?)""",
+                (now, now),
+            )
+        save_risk_policy("bot", 1, self.policy(5, ["BTCUSDT"], "isolated capital for bot one"))
+        save_risk_policy("bot", 2, self.policy(5, ["BTCUSDT"], "isolated capital for bot two"))
+
+        bot_one = place_market_order({"symbol": "BTCUSDT", "side": "buy", "quantity": 0.008, "bot_id": 1})
+        bot_two = place_market_order({"symbol": "BTCUSDT", "side": "buy", "quantity": 0.008, "bot_id": 2})
+        self.assertEqual(bot_one["status"], "filled")
+        self.assertEqual(bot_two["status"], "filled")
+
+        snapshot = account_snapshot()
+        runtime = next(item["risk_budget"] for item in snapshot["bot_performance"] if item["id"] == 1)
+        self.assertEqual(runtime["status"], "warning")
+        self.assertAlmostEqual(runtime["capital_used"], 400)
+        self.assertGreaterEqual(runtime["capital_usage_pct"], 80)
+
+        rejected = place_market_order({"symbol": "BTCUSDT", "side": "buy", "quantity": 0.003, "bot_id": 1})
+        self.assertEqual(rejected["status"], "rejected")
+        bot_check = next(check for check in rejected["risk"]["checks"] if check["code"] == "bot_max_position")
+        account_check = next(check for check in rejected["risk"]["checks"] if check["code"] == "max_position")
+        self.assertFalse(bot_check["passed"])
+        self.assertTrue(account_check["passed"])
+        self.assertGreater(rejected["risk"]["metrics"]["bot_position_pct"], 5)
+        self.assertLess(rejected["risk"]["metrics"]["account_position_pct"], 10)
+
 
 if __name__ == "__main__":
     unittest.main()

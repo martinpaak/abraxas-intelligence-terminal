@@ -362,6 +362,8 @@ def validate_order_intent(payload: dict, *, persist: bool = True) -> dict:
     account_id = int(payload["account_id"]) if payload.get("account_id") is not None else None
     bot_id = int(payload["bot_id"]) if payload.get("bot_id") is not None else None
     current_exposure_notional = max(0.0, float(payload.get("current_exposure_notional") or 0))
+    account_exposure_notional = max(0.0, float(payload.get("account_current_exposure_notional", current_exposure_notional) or 0))
+    bot_exposure_notional = max(0.0, float(payload.get("bot_current_exposure_notional", current_exposure_notional) or 0)) if bot_id is not None else None
     daily_pnl = float(payload["daily_pnl"])
     account_daily_pnl = float(payload.get("account_daily_pnl", daily_pnl))
     bot_daily_pnl = float(payload.get("bot_daily_pnl", daily_pnl)) if bot_id is not None else None
@@ -374,9 +376,15 @@ def validate_order_intent(payload: dict, *, persist: bool = True) -> dict:
         state = dict(connection.execute("SELECT * FROM risk_state WHERE id = 1").fetchone())
 
         reduces_exposure = bool(payload.get("reduces_exposure"))
-        projected_exposure_notional = max(0.0, current_exposure_notional - requested_notional) if reduces_exposure else current_exposure_notional + requested_notional
-        current_position_pct = (current_exposure_notional / account_equity) * 100
-        position_pct = (projected_exposure_notional / account_equity) * 100
+        projected_account_exposure = max(0.0, account_exposure_notional - requested_notional) if reduces_exposure else account_exposure_notional + requested_notional
+        projected_bot_exposure = (max(0.0, bot_exposure_notional - requested_notional) if reduces_exposure else bot_exposure_notional + requested_notional) if bot_exposure_notional is not None else None
+        account_current_position_pct = (account_exposure_notional / account_equity) * 100
+        account_position_pct = (projected_account_exposure / account_equity) * 100
+        bot_current_position_pct = (bot_exposure_notional / account_equity) * 100 if bot_exposure_notional is not None else None
+        bot_position_pct = (projected_bot_exposure / account_equity) * 100 if projected_bot_exposure is not None else None
+        current_position_pct = bot_current_position_pct if bot_id is not None else account_current_position_pct
+        position_pct = bot_position_pct if bot_id is not None else account_position_pct
+        projected_exposure_notional = projected_bot_exposure if bot_id is not None else projected_account_exposure
         account_daily_loss_pct = max(0.0, (-account_daily_pnl / account_equity) * 100)
         bot_daily_loss_pct = max(0.0, (-bot_daily_pnl / account_equity) * 100) if bot_daily_pnl is not None else None
         reasons = []
@@ -400,9 +408,13 @@ def validate_order_intent(payload: dict, *, persist: bool = True) -> dict:
             if reduces_exposure and symbol not in limits["symbol_whitelist"]
             else (f"{symbol} is authorized" if symbol_allowed else f"{symbol} is outside the symbol whitelist"),
         )
-        position_allowed = reduces_exposure or position_pct <= limits["max_position_pct"]
-        position_detail = f"Exposure reduces from {current_position_pct:.2f}% to {position_pct:.2f}%" if reduces_exposure else (f"Projected exposure {position_pct:.2f}% within limit" if position_allowed else f"Projected exposure {position_pct:.2f}% exceeds {limits['max_position_pct']:.2f}%")
+        position_allowed = reduces_exposure or account_position_pct <= account_limits["max_position_pct"]
+        position_detail = f"Account exposure reduces from {account_current_position_pct:.2f}% to {account_position_pct:.2f}%" if reduces_exposure else (f"Projected exposure {account_position_pct:.2f}% within account limit" if position_allowed else f"Projected exposure {account_position_pct:.2f}% exceeds account limit {account_limits['max_position_pct']:.2f}%")
         check("max_position", position_allowed, position_detail)
+        if bot_id is not None:
+            bot_position_allowed = reduces_exposure or bot_position_pct <= limits["max_position_pct"]
+            bot_position_detail = f"Bot exposure reduces from {bot_current_position_pct:.2f}% to {bot_position_pct:.2f}%" if reduces_exposure else (f"Bot projected exposure {bot_position_pct:.2f}% within limit" if bot_position_allowed else f"Bot projected exposure {bot_position_pct:.2f}% exceeds {limits['max_position_pct']:.2f}%")
+            check("bot_max_position", bot_position_allowed, bot_position_detail)
         daily_allowed = reduces_exposure or account_daily_loss_pct < account_limits["max_daily_loss_pct"]
         drawdown_allowed = reduces_exposure or current_drawdown_pct < limits["max_drawdown_pct"]
         check("max_daily_loss", daily_allowed, "Close-only reduction bypasses entry loss limit" if reduces_exposure else (f"Account daily loss {account_daily_loss_pct:.2f}% within limit" if daily_allowed else f"Account daily loss {account_daily_loss_pct:.2f}% reached limit {account_limits['max_daily_loss_pct']:.2f}%"))
@@ -432,6 +444,12 @@ def validate_order_intent(payload: dict, *, persist: bool = True) -> dict:
                 "position_pct": round(position_pct, 4),
                 "current_position_pct": round(current_position_pct, 4),
                 "projected_exposure_notional": round(projected_exposure_notional, 8),
+                "account_position_pct": round(account_position_pct, 4),
+                "account_current_position_pct": round(account_current_position_pct, 4),
+                "projected_account_exposure_notional": round(projected_account_exposure, 8),
+                "bot_position_pct": round(bot_position_pct, 4) if bot_position_pct is not None else None,
+                "bot_current_position_pct": round(bot_current_position_pct, 4) if bot_current_position_pct is not None else None,
+                "projected_bot_exposure_notional": round(projected_bot_exposure, 8) if projected_bot_exposure is not None else None,
                 "daily_loss_pct": round(account_daily_loss_pct, 4),
                 "account_daily_loss_pct": round(account_daily_loss_pct, 4),
                 "bot_daily_loss_pct": round(bot_daily_loss_pct, 4) if bot_daily_loss_pct is not None else None,

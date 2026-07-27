@@ -2078,6 +2078,7 @@ h2 {
 .paper-bot-risk.blocked strong { color: #ff6f80; }
 .paper-bot-risk-track { height: 5px; overflow: hidden; border-radius: 999px; background: #1d2932; }
 .paper-bot-risk-track i { display: block; height: 100%; border-radius: inherit; background: #47d9aa; transition: width .25s ease; }
+.paper-bot-risk-track.capital i { background: #5ba9d9; }
 .paper-bot-risk.warning .paper-bot-risk-track i { background: #d2b66d; }
 .paper-bot-risk.blocked .paper-bot-risk-track i { background: #ff5b6f; }
 .paper-bot-grid p { color: #aab4bf; font-size: 11px; }

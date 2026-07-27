@@ -90,7 +90,10 @@ export default function PaperTradingPanel({ defaultSymbol = "BTCUSDT" }) {
           <div><span>Presupuesto de pérdida diario</span><strong>{bot.risk_budget?.status?.toUpperCase() || "CLEAR"}</strong></div>
           <div className="paper-bot-risk-track" aria-label={`${Number(bot.risk_budget?.daily_loss_usage_pct || 0).toFixed(1)}% del presupuesto diario consumido`}><i style={{ width: `${Math.min(100, Number(bot.risk_budget?.daily_loss_usage_pct || 0))}%` }} /></div>
           <div><small>Usado {money(bot.risk_budget?.daily_loss_used)} / {money(bot.risk_budget?.daily_loss_budget)}</small><small>Disponible {money(bot.risk_budget?.daily_loss_remaining)}</small></div>
-          <small>{Number(bot.risk_budget?.daily_loss_limit_pct || 0).toFixed(2)}% equity · policy {bot.risk_budget?.policy_scope || "global"} · {String(bot.risk_budget?.policy_fingerprint || "").slice(0, 8)}</small>
+          <div><span>Capital abierto del bot</span><strong>{Number(bot.risk_budget?.capital_usage_pct || 0).toFixed(1)}%</strong></div>
+          <div className="paper-bot-risk-track capital" aria-label={`${Number(bot.risk_budget?.capital_usage_pct || 0).toFixed(1)}% del capital del bot consumido`}><i style={{ width: `${Math.min(100, Number(bot.risk_budget?.capital_usage_pct || 0))}%` }} /></div>
+          <div><small>Abierto {money(bot.risk_budget?.capital_used)} / {money(bot.risk_budget?.capital_budget)}</small><small>Disponible {money(bot.risk_budget?.capital_remaining)}</small></div>
+          <small>loss {Number(bot.risk_budget?.daily_loss_limit_pct || 0).toFixed(2)}% · capital {Number(bot.risk_budget?.capital_limit_pct || 0).toFixed(2)}% · policy {bot.risk_budget?.policy_scope || "global"} · {String(bot.risk_budget?.policy_fingerprint || "").slice(0, 8)}</small>
         </div>
         <p>{bot.base_symbol} / {bot.timeframe} / {bot.risk_profile}</p><time>{bot.started_at ? `Desde ${when(bot.started_at)}` : "Sin actividad paper"}</time>
       </article>)}</div>

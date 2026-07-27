@@ -73,6 +73,17 @@ def bot_last_loss_at(connection, bot_id: int) -> str | None:
     return row["created_at"] if row else None
 
 
+def bot_open_exposure_notional(connection, bot_id: int) -> float:
+    rows = connection.execute(
+        """SELECT symbol, SUM(quantity) AS quantity
+        FROM simulated_position_allocations
+        WHERE account_id = ? AND bot_id = ? AND quantity > 0
+        GROUP BY symbol""",
+        (ACCOUNT_ID, bot_id),
+    ).fetchall()
+    return sum(float(row["quantity"]) * latest_price(connection, row["symbol"]) for row in rows)
+
+
 def bot_performance(connection, session_started_at: str, account_equity: float) -> list[dict]:
     bots = [dict(row) for row in connection.execute(
         "SELECT id, name, base_symbol, timeframe, risk_profile, status FROM bots ORDER BY id DESC"
@@ -122,7 +133,12 @@ def bot_performance(connection, session_started_at: str, account_equity: float) 
         daily_loss_budget = account_equity * daily_loss_limit_pct / 100
         daily_loss_used = max(0.0, -daily_realized_pnl)
         daily_loss_usage_pct = (daily_loss_used / daily_loss_budget) * 100 if daily_loss_budget else 100.0
-        risk_status = "blocked" if daily_loss_usage_pct >= 100 else "warning" if daily_loss_usage_pct >= 80 else "clear"
+        capital_limit_pct = float(policy_resolution["effective_limits"]["max_position_pct"])
+        capital_budget = account_equity * capital_limit_pct / 100
+        capital_used = open_value
+        capital_usage_pct = (capital_used / capital_budget) * 100 if capital_budget else 100.0
+        highest_usage_pct = max(daily_loss_usage_pct, capital_usage_pct)
+        risk_status = "blocked" if highest_usage_pct >= 100 else "warning" if highest_usage_pct >= 80 else "clear"
         results.append({
             **bot,
             "paper_status": "activity" if orders else "no_activity",
@@ -144,6 +160,11 @@ def bot_performance(connection, session_started_at: str, account_equity: float) 
                 "daily_loss_used": daily_loss_used,
                 "daily_loss_remaining": max(0.0, daily_loss_budget - daily_loss_used),
                 "daily_loss_usage_pct": daily_loss_usage_pct,
+                "capital_limit_pct": capital_limit_pct,
+                "capital_budget": capital_budget,
+                "capital_used": capital_used,
+                "capital_remaining": max(0.0, capital_budget - capital_used),
+                "capital_usage_pct": capital_usage_pct,
                 "policy_scope": policy_resolution["layers"][-1]["scope_type"],
                 "policy_fingerprint": policy_resolution["fingerprint"],
             },
@@ -420,6 +441,7 @@ def _execute_market_intent_serialized(intent: OrderIntent) -> dict:
         if bot_id is not None and not connection.execute("SELECT 1 FROM bots WHERE id = ?", (bot_id,)).fetchone():
             raise ValueError(f"Bot {bot_id} does not exist")
         price = latest_price(connection, symbol)
+        bot_exposure_notional = bot_open_exposure_notional(connection, bot_id) if bot_id is not None else None
     notional = price * quantity
     existing_position = next((item for item in snapshot["positions"] if item["symbol"] == symbol), None)
     existing_exposure_notional = float(existing_position["market_value"]) if existing_position else 0.0
@@ -439,6 +461,8 @@ def _execute_market_intent_serialized(intent: OrderIntent) -> dict:
         "account_daily_pnl": snapshot["daily_realized_pnl"], "bot_daily_pnl": bot_daily_pnl,
         "current_drawdown_pct": snapshot["drawdown_pct"],
         "current_exposure_notional": existing_exposure_notional,
+        "account_current_exposure_notional": existing_exposure_notional,
+        "bot_current_exposure_notional": bot_exposure_notional,
         "last_loss_at": last_loss_at,
         "reduces_exposure": side == "sell",
     })
