@@ -4,7 +4,7 @@ import json
 from threading import Lock
 from datetime import datetime, timezone
 
-from backend.app.storage.risk import get_risk_profile, validate_order_intent
+from backend.app.storage.risk import get_risk_profile, resolve_risk_policy, validate_order_intent
 from backend.app.market.freshness import MAX_PRICE_DRIFT_PCT, PRICE_MAX_AGE_SECONDS, PROPOSAL_TTL_SECONDS
 from backend.app.execution.contracts import OrderIntent
 from backend.app.storage.execution import get_execution_intent, save_execution_intent, update_execution_intent
@@ -44,7 +44,36 @@ def latest_price_record(connection, symbol: str) -> dict:
     return {"price": float(row["price"]), "timestamp": row["timestamp"]}
 
 
-def bot_performance(connection, session_started_at: str) -> list[dict]:
+def bot_daily_realized_pnl(connection, bot_id: int) -> float:
+    row = connection.execute(
+        """SELECT COALESCE(SUM(ledger.realized_pnl_delta), 0) AS value
+        FROM simulated_ledger AS ledger
+        JOIN simulated_fills AS fill
+          ON ledger.event_type = 'market_fill' AND ledger.reference_id = fill.id
+        JOIN simulated_orders AS paper_order ON paper_order.id = fill.order_id
+        WHERE ledger.account_id = ? AND paper_order.bot_id = ?
+          AND date(ledger.created_at) = date('now')""",
+        (ACCOUNT_ID, bot_id),
+    ).fetchone()
+    return float(row["value"])
+
+
+def bot_last_loss_at(connection, bot_id: int) -> str | None:
+    row = connection.execute(
+        """SELECT ledger.created_at
+        FROM simulated_ledger AS ledger
+        JOIN simulated_fills AS fill
+          ON ledger.event_type = 'market_fill' AND ledger.reference_id = fill.id
+        JOIN simulated_orders AS paper_order ON paper_order.id = fill.order_id
+        WHERE ledger.account_id = ? AND paper_order.bot_id = ?
+          AND ledger.realized_pnl_delta < 0
+        ORDER BY ledger.created_at DESC, ledger.id DESC LIMIT 1""",
+        (ACCOUNT_ID, bot_id),
+    ).fetchone()
+    return row["created_at"] if row else None
+
+
+def bot_performance(connection, session_started_at: str, account_equity: float) -> list[dict]:
     bots = [dict(row) for row in connection.execute(
         "SELECT id, name, base_symbol, timeframe, risk_profile, status FROM bots ORDER BY id DESC"
     ).fetchall()]
@@ -87,6 +116,13 @@ def bot_performance(connection, session_started_at: str) -> list[dict]:
             open_positions.append({"symbol": symbol, "quantity": quantity, "market_price": price, "market_value": value})
         pnl = cash_flow + open_value
         roi_pct = (pnl / deployed) * 100 if deployed else 0.0
+        daily_realized_pnl = bot_daily_realized_pnl(connection, bot["id"])
+        policy_resolution = resolve_risk_policy(ACCOUNT_ID, bot["id"], connection=connection)
+        daily_loss_limit_pct = float(policy_resolution["effective_limits"]["max_daily_loss_pct"])
+        daily_loss_budget = account_equity * daily_loss_limit_pct / 100
+        daily_loss_used = max(0.0, -daily_realized_pnl)
+        daily_loss_usage_pct = (daily_loss_used / daily_loss_budget) * 100 if daily_loss_budget else 100.0
+        risk_status = "blocked" if daily_loss_usage_pct >= 100 else "warning" if daily_loss_usage_pct >= 80 else "clear"
         results.append({
             **bot,
             "paper_status": "activity" if orders else "no_activity",
@@ -100,6 +136,17 @@ def bot_performance(connection, session_started_at: str) -> list[dict]:
             "started_at": orders[0]["created_at"] if orders else None,
             "last_activity_at": orders[-1]["created_at"] if orders else None,
             "open_positions": open_positions,
+            "risk_budget": {
+                "status": risk_status,
+                "daily_realized_pnl": daily_realized_pnl,
+                "daily_loss_limit_pct": daily_loss_limit_pct,
+                "daily_loss_budget": daily_loss_budget,
+                "daily_loss_used": daily_loss_used,
+                "daily_loss_remaining": max(0.0, daily_loss_budget - daily_loss_used),
+                "daily_loss_usage_pct": daily_loss_usage_pct,
+                "policy_scope": policy_resolution["layers"][-1]["scope_type"],
+                "policy_fingerprint": policy_resolution["fingerprint"],
+            },
         })
     return results
 
@@ -243,7 +290,7 @@ def account_snapshot() -> dict:
             ORDER BY created_at DESC LIMIT 30""",
             (account["created_at"],),
         ).fetchall()]
-        performance = bot_performance(connection, account["created_at"])
+        performance = bot_performance(connection, account["created_at"], equity)
     risk_profile = get_risk_profile(audit_limit=1)
     protections = {
         "risk_required": True,
@@ -383,13 +430,16 @@ def _execute_market_intent_serialized(intent: OrderIntent) -> dict:
                ORDER BY created_at DESC, id DESC LIMIT 1""",
             (ACCOUNT_ID,),
         ).fetchone()
+        bot_daily_pnl = bot_daily_realized_pnl(connection, bot_id) if bot_id is not None else None
+        last_loss_at = bot_last_loss_at(connection, bot_id) if bot_id is not None else (last_loss_row["created_at"] if last_loss_row else None)
     decision = validate_order_intent({
         "mode": "paper", "symbol": symbol, "side": "long", "requested_notional": notional,
         "account_id": ACCOUNT_ID, "bot_id": bot_id, "source": "paper_market_execution",
         "account_equity": snapshot["equity"], "daily_pnl": snapshot["daily_realized_pnl"],
+        "account_daily_pnl": snapshot["daily_realized_pnl"], "bot_daily_pnl": bot_daily_pnl,
         "current_drawdown_pct": snapshot["drawdown_pct"],
         "current_exposure_notional": existing_exposure_notional,
-        "last_loss_at": last_loss_row["created_at"] if last_loss_row else None,
+        "last_loss_at": last_loss_at,
         "reduces_exposure": side == "sell",
     })
     with connect() as connection:

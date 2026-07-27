@@ -83,9 +83,15 @@ export default function PaperTradingPanel({ defaultSymbol = "BTCUSDT" }) {
 
     {activeTab === "bots" && <section className="exchange-panel paper-bot-performance">
       <div className="exchange-panel-head compact"><div><p className="eyebrow">Bot ROI profiles</p><h2>Rendimiento atribuido por bot</h2></div><span>FILLS + MARK TO MARKET</span></div>
-      <div className="paper-bot-grid">{snapshot.bot_performance.map((bot) => <article key={bot.id} className={bot.paper_status}>
+      <div className="paper-bot-grid">{snapshot.bot_performance.map((bot) => <article key={bot.id} className={`${bot.paper_status} risk-${bot.risk_budget?.status || "clear"}`}>
         <div className="paper-bot-head"><div><span>BOT #{bot.id}</span><strong>{bot.name}</strong></div><b className={bot.roi_pct >= 0 ? "positive" : "negative"}>{bot.roi_pct >= 0 ? "+" : ""}{Number(bot.roi_pct).toFixed(2)}%</b></div>
         <div className="paper-bot-metrics"><span><small>PnL</small><strong>{money(bot.pnl)}</strong></span><span><small>Capital</small><strong>{money(bot.deployed_capital)}</strong></span><span><small>Fills</small><strong>{bot.filled_orders}</strong></span><span><small>Rechazos</small><strong>{bot.rejected_orders}</strong></span></div>
+        <div className={`paper-bot-risk ${bot.risk_budget?.status || "clear"}`}>
+          <div><span>Presupuesto de pérdida diario</span><strong>{bot.risk_budget?.status?.toUpperCase() || "CLEAR"}</strong></div>
+          <div className="paper-bot-risk-track" aria-label={`${Number(bot.risk_budget?.daily_loss_usage_pct || 0).toFixed(1)}% del presupuesto diario consumido`}><i style={{ width: `${Math.min(100, Number(bot.risk_budget?.daily_loss_usage_pct || 0))}%` }} /></div>
+          <div><small>Usado {money(bot.risk_budget?.daily_loss_used)} / {money(bot.risk_budget?.daily_loss_budget)}</small><small>Disponible {money(bot.risk_budget?.daily_loss_remaining)}</small></div>
+          <small>{Number(bot.risk_budget?.daily_loss_limit_pct || 0).toFixed(2)}% equity · policy {bot.risk_budget?.policy_scope || "global"} · {String(bot.risk_budget?.policy_fingerprint || "").slice(0, 8)}</small>
+        </div>
         <p>{bot.base_symbol} / {bot.timeframe} / {bot.risk_profile}</p><time>{bot.started_at ? `Desde ${when(bot.started_at)}` : "Sin actividad paper"}</time>
       </article>)}</div>
     </section>}

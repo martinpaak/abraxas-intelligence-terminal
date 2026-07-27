@@ -138,6 +138,17 @@ def _resolve_risk_limits(connection, account_id: int | None, bot_id: int | None)
     return effective, {"contract": "risk_policy_resolution_v1", "rule": "most_restrictive_wins", "layers": layers, "effective_limits": effective, "fingerprint": fingerprint}
 
 
+def resolve_risk_policy(account_id: int | None = None, bot_id: int | None = None, *, connection=None) -> dict:
+    """Return the effective, auditable policy without creating a validation row."""
+    if connection is not None:
+        _, resolution = _resolve_risk_limits(connection, account_id, bot_id)
+        return resolution
+    initialize_database()
+    with connect() as owned_connection:
+        _, resolution = _resolve_risk_limits(owned_connection, account_id, bot_id)
+    return resolution
+
+
 def list_risk_policies() -> dict:
     initialize_database()
     with connect() as connection:
@@ -352,10 +363,13 @@ def validate_order_intent(payload: dict, *, persist: bool = True) -> dict:
     bot_id = int(payload["bot_id"]) if payload.get("bot_id") is not None else None
     current_exposure_notional = max(0.0, float(payload.get("current_exposure_notional") or 0))
     daily_pnl = float(payload["daily_pnl"])
+    account_daily_pnl = float(payload.get("account_daily_pnl", daily_pnl))
+    bot_daily_pnl = float(payload.get("bot_daily_pnl", daily_pnl)) if bot_id is not None else None
     current_drawdown_pct = float(payload["current_drawdown_pct"])
 
     with connect() as connection:
         _seed(connection)
+        account_limits, account_policy_resolution = _resolve_risk_limits(connection, account_id, None)
         limits, policy_resolution = _resolve_risk_limits(connection, account_id, bot_id)
         state = dict(connection.execute("SELECT * FROM risk_state WHERE id = 1").fetchone())
 
@@ -363,7 +377,8 @@ def validate_order_intent(payload: dict, *, persist: bool = True) -> dict:
         projected_exposure_notional = max(0.0, current_exposure_notional - requested_notional) if reduces_exposure else current_exposure_notional + requested_notional
         current_position_pct = (current_exposure_notional / account_equity) * 100
         position_pct = (projected_exposure_notional / account_equity) * 100
-        daily_loss_pct = max(0.0, (-daily_pnl / account_equity) * 100)
+        account_daily_loss_pct = max(0.0, (-account_daily_pnl / account_equity) * 100)
+        bot_daily_loss_pct = max(0.0, (-bot_daily_pnl / account_equity) * 100) if bot_daily_pnl is not None else None
         reasons = []
         checks = []
 
@@ -388,9 +403,12 @@ def validate_order_intent(payload: dict, *, persist: bool = True) -> dict:
         position_allowed = reduces_exposure or position_pct <= limits["max_position_pct"]
         position_detail = f"Exposure reduces from {current_position_pct:.2f}% to {position_pct:.2f}%" if reduces_exposure else (f"Projected exposure {position_pct:.2f}% within limit" if position_allowed else f"Projected exposure {position_pct:.2f}% exceeds {limits['max_position_pct']:.2f}%")
         check("max_position", position_allowed, position_detail)
-        daily_allowed = reduces_exposure or daily_loss_pct < limits["max_daily_loss_pct"]
+        daily_allowed = reduces_exposure or account_daily_loss_pct < account_limits["max_daily_loss_pct"]
         drawdown_allowed = reduces_exposure or current_drawdown_pct < limits["max_drawdown_pct"]
-        check("max_daily_loss", daily_allowed, "Close-only reduction bypasses entry loss limit" if reduces_exposure else (f"Daily loss {daily_loss_pct:.2f}% within limit" if daily_allowed else f"Daily loss {daily_loss_pct:.2f}% reached limit {limits['max_daily_loss_pct']:.2f}%"))
+        check("max_daily_loss", daily_allowed, "Close-only reduction bypasses entry loss limit" if reduces_exposure else (f"Account daily loss {account_daily_loss_pct:.2f}% within limit" if daily_allowed else f"Account daily loss {account_daily_loss_pct:.2f}% reached limit {account_limits['max_daily_loss_pct']:.2f}%"))
+        if bot_id is not None:
+            bot_daily_allowed = reduces_exposure or bot_daily_loss_pct < limits["max_daily_loss_pct"]
+            check("bot_max_daily_loss", bot_daily_allowed, "Close-only reduction bypasses bot entry loss limit" if reduces_exposure else (f"Bot daily loss {bot_daily_loss_pct:.2f}% within limit" if bot_daily_allowed else f"Bot daily loss {bot_daily_loss_pct:.2f}% reached limit {limits['max_daily_loss_pct']:.2f}%"))
         check("max_drawdown", drawdown_allowed, "Close-only reduction bypasses entry drawdown limit" if reduces_exposure else (f"Drawdown {current_drawdown_pct:.2f}% within limit" if drawdown_allowed else f"Drawdown {current_drawdown_pct:.2f}% reached limit {limits['max_drawdown_pct']:.2f}%"))
 
         last_loss_at = payload.get("last_loss_at")
@@ -414,7 +432,9 @@ def validate_order_intent(payload: dict, *, persist: bool = True) -> dict:
                 "position_pct": round(position_pct, 4),
                 "current_position_pct": round(current_position_pct, 4),
                 "projected_exposure_notional": round(projected_exposure_notional, 8),
-                "daily_loss_pct": round(daily_loss_pct, 4),
+                "daily_loss_pct": round(account_daily_loss_pct, 4),
+                "account_daily_loss_pct": round(account_daily_loss_pct, 4),
+                "bot_daily_loss_pct": round(bot_daily_loss_pct, 4) if bot_daily_loss_pct is not None else None,
                 "current_drawdown_pct": round(current_drawdown_pct, 4),
                 "cooldown_remaining_minutes": cooldown_remaining,
                 "close_only": reduces_exposure,
@@ -422,6 +442,7 @@ def validate_order_intent(payload: dict, *, persist: bool = True) -> dict:
             "limits_version": policy_resolution["fingerprint"],
             "policy_fingerprint": policy_resolution["fingerprint"],
             "policy_resolution": policy_resolution,
+            "account_policy_resolution": account_policy_resolution,
             "evaluated_at": now.isoformat(),
             "execution_performed": False,
         }

@@ -113,6 +113,38 @@ class RiskPolicyTests(unittest.TestCase):
         self.assertEqual(len(get_dataset_preview("risk_policies", 10)["rows"]), 1)
         self.assertEqual(len(get_dataset_preview("risk_policy_versions", 10)["rows"]), 1)
 
+    def test_bot_daily_loss_budget_is_attributed_and_blocks_new_entries(self) -> None:
+        policy = self.policy(100, ["BTCUSDT"], "one percent bot daily loss budget")
+        policy["max_daily_loss_pct"] = 1
+        policy["cooldown_minutes"] = 0
+        save_risk_policy("bot", 1, policy)
+
+        opened = place_market_order({"symbol": "BTCUSDT", "side": "buy", "quantity": 0.02, "bot_id": 1})
+        self.assertEqual(opened["status"], "filled")
+        now = datetime.now(timezone.utc).isoformat()
+        with connect() as connection:
+            connection.execute(
+                """INSERT INTO market_snapshots (timestamp, symbol, price, change_24h, volume_24h,
+                fear_greed_value, fear_greed_label, risk_level, abraxas_reading)
+                VALUES (?, 'BTCUSDT', 45000, -10, 1000000, 30, 'Fear', 'ELEVATED', 'loss fixture')""",
+                (now,),
+            )
+
+        closed = place_market_order({"symbol": "BTCUSDT", "side": "sell", "quantity": 0.02, "bot_id": 1})
+        self.assertEqual(closed["status"], "filled")
+        snapshot = account_snapshot()
+        runtime = next(item["risk_budget"] for item in snapshot["bot_performance"] if item["id"] == 1)
+        self.assertEqual(runtime["status"], "blocked")
+        self.assertGreater(runtime["daily_loss_usage_pct"], 100)
+        self.assertEqual(runtime["policy_scope"], "bot")
+
+        rejected = place_market_order({"symbol": "BTCUSDT", "side": "buy", "quantity": 0.001, "bot_id": 1})
+        self.assertEqual(rejected["status"], "rejected")
+        bot_check = next(check for check in rejected["risk"]["checks"] if check["code"] == "bot_max_daily_loss")
+        account_check = next(check for check in rejected["risk"]["checks"] if check["code"] == "max_daily_loss")
+        self.assertFalse(bot_check["passed"])
+        self.assertTrue(account_check["passed"])
+
 
 if __name__ == "__main__":
     unittest.main()

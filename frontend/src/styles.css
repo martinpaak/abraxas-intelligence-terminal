@@ -2068,6 +2068,18 @@ h2 {
 .paper-bot-metrics { display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; }
 .paper-bot-metrics span { padding: 8px; border-radius: 5px; background: #0b1218; display: grid; gap: 4px; }
 .paper-bot-metrics small { color: #788691; text-transform: uppercase; font-size: 9px; }
+.paper-bot-grid article.risk-warning { border-color: rgba(210,182,109,.62); }
+.paper-bot-grid article.risk-blocked { border-color: rgba(255,91,111,.62); }
+.paper-bot-risk { display: grid; gap: 8px; padding: 10px; border: 1px solid #293640; border-radius: 6px; background: #0b1218; }
+.paper-bot-risk > div { display: flex; justify-content: space-between; gap: 8px; }
+.paper-bot-risk span, .paper-bot-risk small { color: #87949e; font-size: 9px; text-transform: uppercase; letter-spacing: .05em; }
+.paper-bot-risk strong { color: #47d9aa; font-size: 10px; }
+.paper-bot-risk.warning strong { color: #d2b66d; }
+.paper-bot-risk.blocked strong { color: #ff6f80; }
+.paper-bot-risk-track { height: 5px; overflow: hidden; border-radius: 999px; background: #1d2932; }
+.paper-bot-risk-track i { display: block; height: 100%; border-radius: inherit; background: #47d9aa; transition: width .25s ease; }
+.paper-bot-risk.warning .paper-bot-risk-track i { background: #d2b66d; }
+.paper-bot-risk.blocked .paper-bot-risk-track i { background: #ff5b6f; }
 .paper-bot-grid p { color: #aab4bf; font-size: 11px; }
 @media (max-width: 1050px) { .paper-bot-grid { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 700px) { .paper-bot-grid { grid-template-columns: 1fr; } }
