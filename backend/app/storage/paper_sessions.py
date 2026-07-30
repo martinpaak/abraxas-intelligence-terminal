@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from backend.app.storage.sqlite import connect, initialize_database
 
@@ -93,7 +93,10 @@ def list_paper_bot_sessions(bot_id: int | None = None, limit: int = 100) -> dict
         events = connection.execute(
             "SELECT * FROM paper_bot_session_events ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
-    return {"sessions": [session_row(row) for row in rows], "events": [dict(row) for row in events], "count": len(rows), "live_execution": "blocked"}
+        runs = connection.execute(
+            "SELECT * FROM paper_bot_session_runs ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return {"sessions": [session_row(row) for row in rows], "runs": [dict(row) for row in runs], "events": [dict(row) for row in events], "count": len(rows), "live_execution": "blocked"}
 
 
 def change_paper_bot_session(session_id: int, action: str, reason: str) -> dict:
@@ -131,3 +134,143 @@ def change_paper_bot_session(session_id: int, action: str, reason: str) -> dict:
         add_event(connection, session_id, int(session["bot_id"]), event_type, clean_reason, previous, new_status)
         updated = connection.execute("SELECT * FROM paper_bot_sessions WHERE id = ?", (session_id,)).fetchone()
     return session_row(updated)
+
+
+def next_schedule(scheduled_for: str, cadence_seconds: int, now: datetime) -> str:
+    candidate = datetime.fromisoformat(str(scheduled_for).replace("Z", "+00:00"))
+    if candidate.tzinfo is None:
+        candidate = candidate.replace(tzinfo=timezone.utc)
+    step = timedelta(seconds=int(cadence_seconds))
+    candidate += step
+    while candidate <= now:
+        candidate += step
+    return candidate.isoformat()
+
+
+def finish_session_run(run_id: int, session: dict, status: str, result: dict, evaluation_id: int | None = None, proposal_id: int | None = None, order_id: int | None = None) -> dict:
+    now = utc_now()
+    next_run_at = next_schedule(session["next_run_at"], int(session["cadence_seconds"]), now)
+    with connect() as connection:
+        connection.execute(
+            """UPDATE paper_bot_session_runs SET status = ?, signal = ?, signal_evaluation_id = ?,
+               proposal_id = ?, simulated_order_id = ?, result_json = ?, completed_at = ?
+               WHERE id = ? AND status = 'running'""",
+            (status, result.get("signal"), evaluation_id, proposal_id, order_id, json.dumps(result, sort_keys=True), now.isoformat(), run_id),
+        )
+        connection.execute(
+            """UPDATE paper_bot_sessions SET next_run_at = ?, last_run_at = ?,
+               last_signal_evaluation_id = ?, last_proposal_id = ?, last_error = ?,
+               updated_at = ? WHERE id = ?""",
+            (next_run_at, now.isoformat(), evaluation_id, proposal_id, result.get("reason") if status == "skipped" else None, now.isoformat(), session["id"]),
+        )
+        row = connection.execute("SELECT * FROM paper_bot_session_runs WHERE id = ?", (run_id,)).fetchone()
+    return dict(row)
+
+
+def fail_session_run(run_id: int, session: dict, error: str) -> dict:
+    now = utc_now()
+    with connect() as connection:
+        connection.execute(
+            """UPDATE paper_bot_session_runs SET status = 'error', result_json = ?, completed_at = ?
+            WHERE id = ? AND status = 'running'""",
+            (json.dumps({"error": error}, sort_keys=True), now.isoformat(), run_id),
+        )
+        connection.execute(
+            """UPDATE paper_bot_sessions SET status = 'error', last_run_at = ?,
+               last_error = ?, updated_at = ? WHERE id = ?""",
+            (now.isoformat(), error, now.isoformat(), session["id"]),
+        )
+        add_event(connection, session["id"], session["bot_id"], "error", error, "running", "error", {"run_id": run_id})
+        row = connection.execute("SELECT * FROM paper_bot_session_runs WHERE id = ?", (run_id,)).fetchone()
+    return dict(row)
+
+
+def run_paper_bot_session(session_id: int, scheduled_for: str | None = None) -> dict:
+    initialize_database()
+    now = utc_now()
+    with connect() as connection:
+        row = connection.execute("SELECT * FROM paper_bot_sessions WHERE id = ?", (session_id,)).fetchone()
+        if not row:
+            raise ValueError("Paper bot session not found")
+        session = dict(row)
+        if session["status"] != "running":
+            raise ValueError("Only a running paper bot session can execute")
+        slot = scheduled_for or session["next_run_at"]
+        cursor = connection.execute(
+            """INSERT OR IGNORE INTO paper_bot_session_runs
+            (session_id, bot_id, bot_version_id, scheduled_for, status, result_json, started_at)
+            VALUES (?, ?, ?, ?, 'running', '{}', ?)""",
+            (session["id"], session["bot_id"], session["bot_version_id"], slot, now.isoformat()),
+        )
+        if cursor.rowcount != 1:
+            existing = connection.execute(
+                "SELECT * FROM paper_bot_session_runs WHERE session_id = ? AND scheduled_for = ?",
+                (session["id"], slot),
+            ).fetchone()
+            return {**dict(existing), "recovered": True}
+        run_id = int(cursor.lastrowid)
+
+    try:
+        from backend.app.services.bot_service import (
+            create_saved_bot_paper_proposal,
+            evaluate_saved_bot_signal,
+            submit_saved_bot_paper_proposal,
+        )
+        from backend.app.storage.paper import bot_runtime_state
+
+        with connect() as connection:
+            runtime = bot_runtime_state(connection, int(session["bot_id"]))
+        if runtime["entry_blocked"]:
+            reason = f"Bot runtime blocked: {runtime['reason']}"
+            with connect() as connection:
+                connection.execute(
+                    "UPDATE paper_bot_sessions SET status = 'blocked', last_error = ?, updated_at = ? WHERE id = ?",
+                    (reason, utc_now().isoformat(), session["id"]),
+                )
+                add_event(connection, session["id"], session["bot_id"], "blocked", reason, "running", "blocked", {"run_id": run_id})
+            return finish_session_run(run_id, session, "skipped", {"signal": "blocked", "reason": reason})
+
+        evaluation = evaluate_saved_bot_signal(int(session["bot_id"]), int(session["bot_version_id"]))
+        signal = evaluation["signal"]
+        result = {"signal": signal, "evaluation_id": evaluation["id"], "execution_mode": session["execution_mode"], "live_execution": "blocked"}
+        proposal = None
+        paper_result = None
+        if signal in {"entry_candidate", "exit_candidate"}:
+            proposal = create_saved_bot_paper_proposal(int(session["bot_id"]), int(evaluation["id"]))
+            result["proposal_id"] = proposal["id"]
+            if session["execution_mode"] == "auto_paper":
+                submitted = submit_saved_bot_paper_proposal(int(session["bot_id"]), int(proposal["id"]))
+                paper_result = submitted["paper_result"]
+                result["paper_status"] = paper_result.get("status")
+                result["simulated_order_id"] = paper_result.get("order_id")
+        return finish_session_run(
+            run_id, session, "completed", result, int(evaluation["id"]),
+            int(proposal["id"]) if proposal else None,
+            int(paper_result["order_id"]) if paper_result and paper_result.get("order_id") else None,
+        )
+    except Exception as exc:
+        return fail_session_run(run_id, session, str(exc))
+
+
+def run_due_paper_bot_sessions(limit: int = 20) -> dict:
+    initialize_database()
+    now = utc_now().isoformat()
+    with connect() as connection:
+        due = [
+            dict(row) for row in connection.execute(
+                """SELECT * FROM paper_bot_sessions
+                WHERE status = 'running' AND next_run_at <= ?
+                ORDER BY next_run_at, id LIMIT ?""",
+                (now, max(1, min(int(limit), 100))),
+            ).fetchall()
+        ]
+    results = [run_paper_bot_session(session["id"], session["next_run_at"]) for session in due]
+    return {
+        "due": len(due),
+        "completed": sum(item["status"] == "completed" for item in results),
+        "skipped": sum(item["status"] == "skipped" for item in results),
+        "errors": sum(item["status"] == "error" for item in results),
+        "runs": results,
+        "execution_environment": "paper",
+        "live_execution": "blocked",
+    }

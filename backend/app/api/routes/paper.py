@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from backend.app.storage.paper import account_snapshot, place_market_order, reconcile_paper_runtime, reset_account, set_bot_circuit_breaker, set_bot_runtime_state, update_position_protection
-from backend.app.storage.paper_sessions import change_paper_bot_session, list_paper_bot_sessions, start_paper_bot_session
+from backend.app.storage.paper_sessions import change_paper_bot_session, list_paper_bot_sessions, run_due_paper_bot_sessions, run_paper_bot_session, start_paper_bot_session
 
 router = APIRouter(prefix="/api/paper", tags=["paper-trading"])
 
@@ -91,6 +91,19 @@ def paper_sessions(bot_id: int | None = None, limit: int = 100) -> dict:
 def paper_session_start(payload: PaperBotSessionStartRequest) -> dict:
     try:
         return start_paper_bot_session(**values(payload))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/sessions/run-due")
+def paper_sessions_run_due(limit: int = 20) -> dict:
+    return run_due_paper_bot_sessions(limit=limit)
+
+
+@router.post("/sessions/{session_id}/run")
+def paper_session_run(session_id: int) -> dict:
+    try:
+        return run_paper_bot_session(session_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

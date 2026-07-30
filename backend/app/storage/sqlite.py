@@ -990,6 +990,32 @@ WHERE status IN ('running', 'paused', 'blocked', 'error');
 CREATE INDEX IF NOT EXISTS idx_paper_bot_sessions_due
 ON paper_bot_sessions(status, next_run_at);
 
+CREATE TABLE IF NOT EXISTS paper_bot_session_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL,
+    bot_id INTEGER NOT NULL,
+    bot_version_id INTEGER NOT NULL,
+    scheduled_for TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'skipped', 'error')),
+    signal TEXT,
+    signal_evaluation_id INTEGER,
+    proposal_id INTEGER,
+    simulated_order_id INTEGER,
+    result_json TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    FOREIGN KEY(session_id) REFERENCES paper_bot_sessions(id) ON DELETE CASCADE,
+    FOREIGN KEY(bot_id) REFERENCES bots(id) ON DELETE CASCADE,
+    FOREIGN KEY(bot_version_id) REFERENCES bot_versions(id),
+    FOREIGN KEY(signal_evaluation_id) REFERENCES strategy_signal_evaluations(id),
+    FOREIGN KEY(proposal_id) REFERENCES paper_order_proposals(id),
+    FOREIGN KEY(simulated_order_id) REFERENCES simulated_orders(id),
+    UNIQUE(session_id, scheduled_for)
+);
+
+CREATE INDEX IF NOT EXISTS idx_paper_bot_session_runs_session_time
+ON paper_bot_session_runs(session_id, scheduled_for);
+
 CREATE TABLE IF NOT EXISTS paper_bot_session_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id INTEGER NOT NULL,
