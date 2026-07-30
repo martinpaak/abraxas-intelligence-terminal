@@ -93,6 +93,8 @@ SOURCE_CATALOG = [
             "paper_bot_circuit_breakers",
             "paper_bot_circuit_events",
             "paper_bot_equity_snapshots",
+            "paper_bot_sessions",
+            "paper_bot_session_events",
             "exchange_source_health",
             "execution_intents",
             "liquidity_sweep_evaluations",
@@ -419,6 +421,8 @@ DATASET_CATALOG = [
             ("paper_bot_circuit_breakers", "Configuracion persistida de protecciones automaticas por bot paper."),
             ("paper_bot_circuit_events", "Disparos auditables de breakers por perdidas consecutivas o rafagas de rechazo."),
             ("paper_bot_equity_snapshots", "Curva patrimonial y drawdown mark-to-market atribuida a cada bot paper."),
+            ("paper_bot_sessions", "Sesiones operativas persistidas que fijan version, cadencia y modo paper de cada bot."),
+            ("paper_bot_session_events", "Historial append-only de inicio, pausa, reanudacion, bloqueo y cierre de sesiones."),
         ]
     ],
     *[
