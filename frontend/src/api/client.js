@@ -447,6 +447,28 @@ export function setPaperBotCircuitBreaker(botId, payload) {
   return request(`/api/paper/bots/${botId}/circuit-breaker`, { method: "PUT", body: JSON.stringify(payload) });
 }
 
+export function getPaperSessions(botId = null, limit = 100) {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (botId) params.set("bot_id", String(botId));
+  return request(`/api/paper/sessions?${params}`);
+}
+
+export function startPaperSession(payload) {
+  return request("/api/paper/sessions", { method: "POST", body: JSON.stringify(payload) });
+}
+
+export function changePaperSession(sessionId, payload) {
+  return request(`/api/paper/sessions/${sessionId}`, { method: "PATCH", body: JSON.stringify(payload) });
+}
+
+export function runPaperSession(sessionId) {
+  return request(`/api/paper/sessions/${sessionId}/run`, { method: "POST" });
+}
+
+export function runDuePaperSessions(limit = 20) {
+  return request(`/api/paper/sessions/run-due?limit=${limit}`, { method: "POST" });
+}
+
 export function updatePaperProtection(allocationId, payload) {
   return request(`/api/paper/allocations/${allocationId}/protection`, { method: "PATCH", body: JSON.stringify(payload) });
 }

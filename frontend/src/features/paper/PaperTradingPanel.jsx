@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { getPaperAccount, placePaperOrder, resetPaperAccount, setPaperBotCircuitBreaker, setPaperBotRuntime } from "../../api/client.js";
+import { changePaperSession, getPaperAccount, getPaperSessions, placePaperOrder, resetPaperAccount, runDuePaperSessions, runPaperSession, setPaperBotCircuitBreaker, setPaperBotRuntime, startPaperSession } from "../../api/client.js";
 
 const money = (value) => Number(value || 0).toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 2 });
 const when = (value) => value ? new Date(value).toLocaleString() : "--";
@@ -7,13 +7,17 @@ const when = (value) => value ? new Date(value).toLocaleString() : "--";
 export default function PaperTradingPanel({ defaultSymbol = "BTCUSDT" }) {
   const [activeTab, setActiveTab] = useState("account");
   const [snapshot, setSnapshot] = useState(null);
+  const [sessions, setSessions] = useState({ sessions: [], runs: [], events: [] });
   const [order, setOrder] = useState({ symbol: defaultSymbol, side: "buy", quantity: "0.001" });
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
   const load = async () => {
-    try { setSnapshot(await getPaperAccount()); setError(""); }
+    try {
+      const [paperSnapshot, sessionSnapshot] = await Promise.all([getPaperAccount(), getPaperSessions()]);
+      setSnapshot(paperSnapshot); setSessions(sessionSnapshot); setError("");
+    }
     catch (requestError) { setError(requestError.message); }
   };
   useEffect(() => { load(); }, []);
@@ -87,6 +91,37 @@ export default function PaperTradingPanel({ defaultSymbol = "BTCUSDT" }) {
     } catch (requestError) { setError(requestError.message); }
     finally { setBusy(false); }
   };
+  const startSession = async (bot) => {
+    const raw = window.prompt("Modo y cadencia en segundos: observe o auto_paper, mínimo 60s", "observe, 300");
+    if (!raw) return;
+    const [executionMode, cadenceRaw] = raw.split(",").map((value) => value.trim());
+    const cadenceSeconds = Number(cadenceRaw);
+    if (!["observe", "auto_paper"].includes(executionMode) || !Number.isFinite(cadenceSeconds) || cadenceSeconds < 60) {
+      setError("Sesión inválida. Usa por ejemplo: observe, 300");
+      return;
+    }
+    if (executionMode === "auto_paper" && !window.confirm("AUTO PAPER puede crear fills simulados después del Risk Engine. No ejecuta órdenes reales. ¿Continuar?")) return;
+    setBusy(true);
+    try { await startPaperSession({ bot_id: bot.id, cadence_seconds: cadenceSeconds, execution_mode: executionMode }); await load(); }
+    catch (requestError) { setError(requestError.message); }
+    finally { setBusy(false); }
+  };
+  const actOnSession = async (session, action) => {
+    const reason = window.prompt(`Motivo para ${action} sesión #${session.id}:`);
+    if (!reason?.trim()) return;
+    setBusy(true);
+    try { await changePaperSession(session.id, { action, reason: reason.trim() }); await load(); }
+    catch (requestError) { setError(requestError.message); }
+    finally { setBusy(false); }
+  };
+  const runSession = async (sessionId = null) => {
+    setBusy(true);
+    try {
+      setResult(sessionId ? await runPaperSession(sessionId) : await runDuePaperSessions());
+      await load();
+    } catch (requestError) { setError(requestError.message); }
+    finally { setBusy(false); }
+  };
 
   if (!snapshot) return <section className="exchange-panel paper-panel"><div className="chart-state">{error || "Cargando cuenta paper desde SQLite..."}</div></section>;
   const protections = snapshot.protections || {};
@@ -100,7 +135,7 @@ export default function PaperTradingPanel({ defaultSymbol = "BTCUSDT" }) {
       <article><span>Proposal TTL</span><strong>{protections.proposal_ttl_seconds ?? "--"}s</strong><small>drift {protections.max_price_drift_pct ?? "--"}%</small></article>
     </section>
     <nav className="paper-subtabs" aria-label="Paper Trading sections">
-      {[["account", "Cuenta"], ["activity", "Actividad"], ["bots", "Bots"]].map(([value, label]) => <button type="button" key={value} className={activeTab === value ? "active" : ""} onClick={() => setActiveTab(value)}>{label}</button>)}
+      {[["account", "Cuenta"], ["activity", "Actividad"], ["bots", "Bots"], ["sessions", "Sesiones"]].map(([value, label]) => <button type="button" key={value} className={activeTab === value ? "active" : ""} onClick={() => setActiveTab(value)}>{label}</button>)}
     </nav>
 
     {activeTab === "account" && <>
@@ -162,7 +197,28 @@ export default function PaperTradingPanel({ defaultSymbol = "BTCUSDT" }) {
           <small>loss {Number(bot.risk_budget?.daily_loss_limit_pct || 0).toFixed(2)}% · capital {Number(bot.risk_budget?.capital_limit_pct || 0).toFixed(2)}% · policy {bot.risk_budget?.policy_scope || "global"} · {String(bot.risk_budget?.policy_fingerprint || "").slice(0, 8)}</small>
         </div>
         <p>{bot.base_symbol} / {bot.timeframe} / {bot.risk_profile}</p><time>{bot.started_at ? `Desde ${when(bot.started_at)}` : "Sin actividad paper"}</time>
+        <button type="button" className="secondary" disabled={busy || sessions.sessions.some((session) => session.bot_id === bot.id && session.status !== "stopped")} onClick={() => startSession(bot)}>Iniciar sesión paper</button>
       </article>)}</div>
+    </section>}
+
+    {activeTab === "sessions" && <section className="paper-session-stack">
+      <section className="exchange-panel paper-session-control">
+        <div className="exchange-panel-head compact"><div><p className="eyebrow">Paper scheduler</p><h2>Sesiones operativas</h2></div><button type="button" disabled={busy} onClick={() => runSession()}>{busy ? "Procesando..." : "Ejecutar vencidas"}</button></div>
+        <p>Cada ciclo usa una versión fija, features cerradas, propuestas idempotentes y Risk Engine obligatorio. Live permanece bloqueado.</p>
+        <div className="paper-session-grid">{sessions.sessions.map((session) => <article key={session.id} className={`session-${session.status}`}>
+          <div><span>SESSION #{session.id} · BOT #{session.bot_id}</span><strong>{session.status.toUpperCase()}</strong></div>
+          <div><small>Modo</small><b>{session.execution_mode}</b><small>Cadencia</small><b>{session.cadence_seconds}s</b></div>
+          <div><small>Próximo ciclo</small><time>{when(session.next_run_at)}</time></div>
+          {session.last_error && <p>{session.last_error}</p>}
+          <footer>
+            {session.status === "running" && <><button type="button" disabled={busy} onClick={() => runSession(session.id)}>Run now</button><button type="button" className="secondary" disabled={busy} onClick={() => actOnSession(session, "pause")}>Pausar</button></>}
+            {["paused", "blocked", "error"].includes(session.status) && <button type="button" disabled={busy} onClick={() => actOnSession(session, "resume")}>Reanudar</button>}
+            {session.status !== "stopped" && <button type="button" className="secondary" disabled={busy} onClick={() => actOnSession(session, "stop")}>Detener</button>}
+          </footer>
+        </article>)}</div>
+      </section>
+      <AuditTable title="Session runs" columns={["id", "session_id", "bot_id", "scheduled_for", "status", "signal", "signal_evaluation_id", "proposal_id", "simulated_order_id", "completed_at"]} rows={sessions.runs || []} />
+      <AuditTable title="Session events" columns={["id", "session_id", "bot_id", "event_type", "previous_status", "new_status", "reason", "created_at"]} rows={sessions.events || []} />
     </section>}
   </>;
 }
