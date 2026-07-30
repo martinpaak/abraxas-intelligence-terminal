@@ -54,7 +54,34 @@ export default function PaperTradingPanel({ defaultSymbol = "BTCUSDT" }) {
         max_consecutive_losses: config.max_consecutive_losses || 3,
         max_rejections: config.max_rejections || 5,
         rejection_window_minutes: config.rejection_window_minutes || 15,
+        max_drawdown_pct: config.max_drawdown_pct || 10,
         pause_minutes: config.pause_minutes || 60,
+      });
+      await load();
+    } catch (requestError) { setError(requestError.message); }
+    finally { setBusy(false); }
+  };
+  const configureCircuitBreaker = async (bot) => {
+    const config = bot.circuit_breaker?.config || {};
+    const raw = window.prompt(
+      "Pérdidas consecutivas, rechazos, ventana minutos, drawdown %, pausa minutos",
+      [config.max_consecutive_losses || 3, config.max_rejections || 5, config.rejection_window_minutes || 15, config.max_drawdown_pct || 10, config.pause_minutes || 60].join(", "),
+    );
+    if (!raw) return;
+    const values = raw.split(",").map((value) => Number(value.trim()));
+    if (values.length !== 5 || values.some((value) => !Number.isFinite(value) || value <= 0)) {
+      setError("Configuración inválida: ingresa cinco números positivos separados por comas.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await setPaperBotCircuitBreaker(bot.id, {
+        enabled: config.enabled !== false,
+        max_consecutive_losses: values[0],
+        max_rejections: values[1],
+        rejection_window_minutes: values[2],
+        max_drawdown_pct: values[3],
+        pause_minutes: values[4],
       });
       await load();
     } catch (requestError) { setError(requestError.message); }
@@ -118,7 +145,10 @@ export default function PaperTradingPanel({ defaultSymbol = "BTCUSDT" }) {
           <div><span>Circuit breaker</span><strong>{String(bot.circuit_breaker?.status || "armed").toUpperCase()}</strong></div>
           <div><small>Pérdidas seguidas</small><b>{bot.circuit_breaker?.consecutive_losses || 0}/{bot.circuit_breaker?.config?.max_consecutive_losses || 3}</b></div>
           <div><small>Rechazos / {bot.circuit_breaker?.config?.rejection_window_minutes || 15}m</small><b>{bot.circuit_breaker?.rejections_in_window || 0}/{bot.circuit_breaker?.config?.max_rejections || 5}</b></div>
+          <div><small>Drawdown</small><b>{Number(bot.circuit_breaker?.drawdown_pct || 0).toFixed(2)}% / {Number(bot.circuit_breaker?.config?.max_drawdown_pct || 10).toFixed(2)}%</b></div>
+          <div><small>Equity bot</small><b>{money(bot.equity_state?.equity)}</b></div>
           <button type="button" className="secondary" disabled={busy} onClick={() => toggleCircuitBreaker(bot)}>{bot.circuit_breaker?.config?.enabled ? "Desarmar" : "Armar"}</button>
+          <button type="button" className="secondary" disabled={busy} onClick={() => configureCircuitBreaker(bot)}>Configurar umbrales</button>
           <small>Si dispara, pausa entradas {bot.circuit_breaker?.config?.pause_minutes || 60} min. Los cierres continúan permitidos.</small>
         </div>
         <div className="paper-bot-metrics"><span><small>PnL</small><strong>{money(bot.pnl)}</strong></span><span><small>Capital</small><strong>{money(bot.deployed_capital)}</strong></span><span><small>Fills</small><strong>{bot.filled_orders}</strong></span><span><small>Rechazos</small><strong>{bot.rejected_orders}</strong></span></div>

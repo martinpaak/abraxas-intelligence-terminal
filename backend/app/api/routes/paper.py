@@ -37,6 +37,7 @@ class PaperBotCircuitBreakerRequest(BaseModel):
     max_consecutive_losses: int = Field(default=3, ge=1, le=100)
     max_rejections: int = Field(default=5, ge=1, le=1000)
     rejection_window_minutes: int = Field(default=15, ge=1, le=1440)
+    max_drawdown_pct: float = Field(default=10, gt=0, le=100)
     pause_minutes: int = Field(default=60, ge=1, le=43_200)
 
 

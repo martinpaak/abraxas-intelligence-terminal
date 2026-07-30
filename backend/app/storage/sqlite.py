@@ -921,6 +921,7 @@ CREATE TABLE IF NOT EXISTS paper_bot_circuit_breakers (
     max_consecutive_losses INTEGER NOT NULL DEFAULT 3 CHECK (max_consecutive_losses BETWEEN 1 AND 100),
     max_rejections INTEGER NOT NULL DEFAULT 5 CHECK (max_rejections BETWEEN 1 AND 1000),
     rejection_window_minutes INTEGER NOT NULL DEFAULT 15 CHECK (rejection_window_minutes BETWEEN 1 AND 1440),
+    max_drawdown_pct REAL NOT NULL DEFAULT 10 CHECK (max_drawdown_pct > 0 AND max_drawdown_pct <= 100),
     pause_minutes INTEGER NOT NULL DEFAULT 60 CHECK (pause_minutes BETWEEN 1 AND 43200),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -941,6 +942,24 @@ CREATE TABLE IF NOT EXISTS paper_bot_circuit_events (
 
 CREATE INDEX IF NOT EXISTS idx_paper_bot_circuit_events_bot_time
 ON paper_bot_circuit_events(bot_id, created_at);
+
+CREATE TABLE IF NOT EXISTS paper_bot_equity_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id INTEGER NOT NULL,
+    equity REAL NOT NULL,
+    peak_equity REAL NOT NULL,
+    drawdown_pct REAL NOT NULL,
+    pnl REAL NOT NULL,
+    open_value REAL NOT NULL,
+    capital_basis REAL NOT NULL,
+    source_fingerprint TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(bot_id) REFERENCES bots(id) ON DELETE CASCADE,
+    UNIQUE(bot_id, source_fingerprint)
+);
+
+CREATE INDEX IF NOT EXISTS idx_paper_bot_equity_snapshots_bot_time
+ON paper_bot_equity_snapshots(bot_id, created_at);
 
 CREATE TABLE IF NOT EXISTS exchange_source_health (
     exchange_id TEXT NOT NULL,
@@ -1353,6 +1372,9 @@ def initialize_database() -> None:
         protection_columns = {row["name"] for row in connection.execute("PRAGMA table_info(paper_position_protections)").fetchall()}
         if protection_columns and "highest_price" not in protection_columns:
             connection.execute("ALTER TABLE paper_position_protections ADD COLUMN highest_price REAL")
+        circuit_columns = {row["name"] for row in connection.execute("PRAGMA table_info(paper_bot_circuit_breakers)").fetchall()}
+        if "max_drawdown_pct" not in circuit_columns:
+            connection.execute("ALTER TABLE paper_bot_circuit_breakers ADD COLUMN max_drawdown_pct REAL NOT NULL DEFAULT 10")
         spot_portfolio_columns = {
             row["name"] for row in connection.execute("PRAGMA table_info(spot_portfolios)").fetchall()
         }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from threading import Lock
 from datetime import datetime, timedelta, timezone
 
@@ -161,8 +162,8 @@ def circuit_breaker_config(connection, bot_id: int) -> dict:
     connection.execute(
         """INSERT OR IGNORE INTO paper_bot_circuit_breakers
         (bot_id, enabled, max_consecutive_losses, max_rejections, rejection_window_minutes,
-         pause_minutes, created_at, updated_at)
-        VALUES (?, 1, 3, 5, 15, 60, ?, ?)""",
+         max_drawdown_pct, pause_minutes, created_at, updated_at)
+        VALUES (?, 1, 3, 5, 15, 10, 60, ?, ?)""",
         (bot_id, now, now),
     )
     row = dict(connection.execute(
@@ -181,6 +182,7 @@ def set_bot_circuit_breaker(bot_id: int, payload: dict) -> dict:
         "max_consecutive_losses": int(payload.get("max_consecutive_losses", 3)),
         "max_rejections": int(payload.get("max_rejections", 5)),
         "rejection_window_minutes": int(payload.get("rejection_window_minutes", 15)),
+        "max_drawdown_pct": float(payload.get("max_drawdown_pct", 10)),
         "pause_minutes": int(payload.get("pause_minutes", 60)),
     }
     if not 1 <= values["max_consecutive_losses"] <= 100:
@@ -189,6 +191,8 @@ def set_bot_circuit_breaker(bot_id: int, payload: dict) -> dict:
         raise ValueError("Rejection threshold must be between 1 and 1,000")
     if not 1 <= values["rejection_window_minutes"] <= 1440:
         raise ValueError("Rejection window must be between 1 and 1,440 minutes")
+    if not 0 < values["max_drawdown_pct"] <= 100:
+        raise ValueError("Drawdown threshold must be greater than 0 and at most 100 percent")
     if not 1 <= values["pause_minutes"] <= 43_200:
         raise ValueError("Circuit pause must be between 1 and 43,200 minutes")
     now = utc_now_iso()
@@ -199,7 +203,7 @@ def set_bot_circuit_breaker(bot_id: int, payload: dict) -> dict:
         connection.execute(
             """UPDATE paper_bot_circuit_breakers
             SET enabled = ?, max_consecutive_losses = ?, max_rejections = ?,
-                rejection_window_minutes = ?, pause_minutes = ?, updated_at = ?
+                rejection_window_minutes = ?, max_drawdown_pct = ?, pause_minutes = ?, updated_at = ?
             WHERE bot_id = ?""",
             (*values.values(), now, bot_id),
         )
@@ -225,7 +229,34 @@ def consecutive_bot_losses(connection, bot_id: int) -> int:
     return count
 
 
-def evaluate_bot_circuit_breaker(connection, bot_id: int) -> dict:
+def persist_bot_equity_snapshot(connection, bot_id: int, pnl: float, open_value: float, capital_basis: float) -> dict:
+    equity = max(0.0, capital_basis + pnl)
+    previous_peak = connection.execute(
+        """SELECT MAX(peak_equity) AS value FROM paper_bot_equity_snapshots
+        WHERE bot_id = ? AND ABS(capital_basis - ?) < 0.000001""",
+        (bot_id, capital_basis),
+    ).fetchone()["value"]
+    peak = max(float(previous_peak or capital_basis), equity)
+    drawdown_pct = max(0.0, ((peak - equity) / peak) * 100) if peak else 0.0
+    evidence = {
+        "equity": round(equity, 8),
+        "peak_equity": round(peak, 8),
+        "pnl": round(pnl, 8),
+        "open_value": round(open_value, 8),
+        "capital_basis": round(capital_basis, 8),
+    }
+    fingerprint = hashlib.sha256(json.dumps(evidence, sort_keys=True).encode()).hexdigest()
+    connection.execute(
+        """INSERT OR IGNORE INTO paper_bot_equity_snapshots
+        (bot_id, equity, peak_equity, drawdown_pct, pnl, open_value, capital_basis,
+         source_fingerprint, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (bot_id, equity, peak, drawdown_pct, pnl, open_value, capital_basis, fingerprint, utc_now_iso()),
+    )
+    return {**evidence, "drawdown_pct": round(drawdown_pct, 8), "source_fingerprint": fingerprint}
+
+
+def evaluate_bot_circuit_breaker(connection, bot_id: int, equity_state: dict | None = None) -> dict:
     config = circuit_breaker_config(connection, bot_id)
     runtime = bot_runtime_state(connection, bot_id)
     cutoff = (datetime.now(timezone.utc) - timedelta(minutes=config["rejection_window_minutes"])).isoformat()
@@ -250,7 +281,11 @@ def evaluate_bot_circuit_breaker(connection, bot_id: int) -> dict:
     observed = 0
     threshold = 0
     evidence_id = None
-    if config["enabled"] and loss_count >= config["max_consecutive_losses"]:
+    drawdown_pct = float((equity_state or {}).get("drawdown_pct") or 0)
+    if config["enabled"] and drawdown_pct >= config["max_drawdown_pct"]:
+        trigger, observed, threshold = "max_drawdown", drawdown_pct, config["max_drawdown_pct"]
+        evidence_id = (equity_state or {}).get("source_fingerprint")
+    elif config["enabled"] and loss_count >= config["max_consecutive_losses"]:
         trigger, observed, threshold, evidence_id = "consecutive_losses", loss_count, config["max_consecutive_losses"], latest_loss_row["id"]
     elif config["enabled"] and rejection_count >= config["max_rejections"]:
         trigger, observed, threshold, evidence_id = "rejection_burst", rejection_count, config["max_rejections"], rejection_row["latest_id"]
@@ -291,6 +326,7 @@ def evaluate_bot_circuit_breaker(connection, bot_id: int) -> dict:
                 "rejection_window_minutes": config["rejection_window_minutes"],
                 "pause_minutes": config["pause_minutes"],
                 "evidence_id": evidence_id,
+                "drawdown_pct": drawdown_pct,
             }, sort_keys=True), now.isoformat()),
         )
         runtime = bot_runtime_state(connection, bot_id)
@@ -299,6 +335,7 @@ def evaluate_bot_circuit_breaker(connection, bot_id: int) -> dict:
         "status": "tripped" if runtime["status"] == "paused" and str(runtime["reason"]).startswith("Automatic circuit breaker") else "armed" if config["enabled"] else "disabled",
         "consecutive_losses": loss_count,
         "rejections_in_window": rejection_count,
+        "drawdown_pct": drawdown_pct,
         "runtime": runtime,
     }
 
@@ -357,7 +394,8 @@ def bot_performance(connection, session_started_at: str, account_equity: float) 
         capital_used = open_value
         capital_usage_pct = (capital_used / capital_budget) * 100 if capital_budget else 100.0
         highest_usage_pct = max(daily_loss_usage_pct, capital_usage_pct)
-        circuit_breaker = evaluate_bot_circuit_breaker(connection, bot["id"])
+        equity_state = persist_bot_equity_snapshot(connection, bot["id"], pnl, open_value, capital_budget)
+        circuit_breaker = evaluate_bot_circuit_breaker(connection, bot["id"], equity_state)
         runtime = circuit_breaker["runtime"]
         risk_status = "blocked" if runtime["entry_blocked"] or highest_usage_pct >= 100 else "warning" if highest_usage_pct >= 80 else "clear"
         results.append({
@@ -375,6 +413,7 @@ def bot_performance(connection, session_started_at: str, account_equity: float) 
             "open_positions": open_positions,
             "runtime": runtime,
             "circuit_breaker": circuit_breaker,
+            "equity_state": equity_state,
             "risk_budget": {
                 "status": risk_status,
                 "daily_realized_pnl": daily_realized_pnl,

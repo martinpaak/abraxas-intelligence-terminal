@@ -7,7 +7,7 @@ from pathlib import Path
 
 from backend.app.services.data_center_service import get_dataset_preview
 from backend.app.storage import sqlite as storage_sqlite
-from backend.app.storage.paper import account_snapshot, place_market_order, set_bot_circuit_breaker, set_bot_runtime_state
+from backend.app.storage.paper import account_snapshot, evaluate_bot_circuit_breaker, persist_bot_equity_snapshot, place_market_order, set_bot_circuit_breaker, set_bot_runtime_state
 from backend.app.storage.risk import (
     archive_risk_policy,
     list_risk_policies,
@@ -238,6 +238,30 @@ class RiskPolicyTests(unittest.TestCase):
         self.assertEqual(bot["runtime"]["status"], "active")
         self.assertEqual(bot["circuit_breaker"]["status"], "armed")
         self.assertEqual(len(rearmed["bot_circuit_events"]), 1)
+
+    def test_bot_drawdown_curve_is_persisted_and_trips_breaker(self) -> None:
+        set_bot_circuit_breaker(1, {
+            "enabled": True,
+            "max_consecutive_losses": 10,
+            "max_rejections": 50,
+            "rejection_window_minutes": 15,
+            "max_drawdown_pct": 10,
+            "pause_minutes": 45,
+        })
+        with connect() as connection:
+            baseline = persist_bot_equity_snapshot(connection, 1, 0, 0, 1000)
+            self.assertEqual(baseline["drawdown_pct"], 0)
+            declined = persist_bot_equity_snapshot(connection, 1, -120, 0, 1000)
+            decision = evaluate_bot_circuit_breaker(connection, 1, declined)
+            self.assertEqual(decision["status"], "tripped")
+            self.assertAlmostEqual(decision["drawdown_pct"], 12)
+            self.assertEqual(decision["runtime"]["status"], "paused")
+        rows = get_dataset_preview("paper_bot_equity_snapshots", 10)["rows"]
+        comparable_rows = [row for row in rows if float(row["capital_basis"]) == 1000]
+        self.assertGreaterEqual(len(comparable_rows), 2)
+        self.assertTrue(any(abs(float(row["drawdown_pct"]) - 12) < 0.0001 for row in comparable_rows))
+        events = get_dataset_preview("paper_bot_circuit_events", 10)["rows"]
+        self.assertEqual(events[0]["trigger_code"], "max_drawdown")
 
 
 if __name__ == "__main__":
