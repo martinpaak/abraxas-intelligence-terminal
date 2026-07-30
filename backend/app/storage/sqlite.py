@@ -890,6 +890,31 @@ CREATE INDEX IF NOT EXISTS idx_simulated_orders_created ON simulated_orders(crea
 CREATE INDEX IF NOT EXISTS idx_simulated_fills_filled ON simulated_fills(filled_at);
 CREATE INDEX IF NOT EXISTS idx_simulated_ledger_created ON simulated_ledger(created_at);
 
+CREATE TABLE IF NOT EXISTS paper_bot_runtime_state (
+    bot_id INTEGER PRIMARY KEY,
+    status TEXT NOT NULL CHECK (status IN ('active', 'paused')),
+    reason TEXT NOT NULL,
+    paused_until TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(bot_id) REFERENCES bots(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS paper_bot_runtime_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id INTEGER NOT NULL,
+    event_type TEXT NOT NULL CHECK (event_type IN ('paused', 'resumed', 'auto_resumed')),
+    previous_status TEXT NOT NULL,
+    new_status TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    paused_until TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(bot_id) REFERENCES bots(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_paper_bot_runtime_events_bot_time
+ON paper_bot_runtime_events(bot_id, created_at);
+
 CREATE TABLE IF NOT EXISTS exchange_source_health (
     exchange_id TEXT NOT NULL,
     endpoint TEXT NOT NULL,

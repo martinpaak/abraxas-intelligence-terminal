@@ -439,6 +439,10 @@ export function resetPaperAccount(payload) {
   return request("/api/paper/reset", { method: "POST", body: JSON.stringify(payload) });
 }
 
+export function setPaperBotRuntime(botId, payload) {
+  return request(`/api/paper/bots/${botId}/runtime`, { method: "PATCH", body: JSON.stringify(payload) });
+}
+
 export function updatePaperProtection(allocationId, payload) {
   return request(`/api/paper/allocations/${allocationId}/protection`, { method: "PATCH", body: JSON.stringify(payload) });
 }

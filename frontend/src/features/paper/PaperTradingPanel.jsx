@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { getPaperAccount, placePaperOrder, resetPaperAccount } from "../../api/client.js";
+import { getPaperAccount, placePaperOrder, resetPaperAccount, setPaperBotRuntime } from "../../api/client.js";
 
 const money = (value) => Number(value || 0).toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 2 });
 const when = (value) => value ? new Date(value).toLocaleString() : "--";
@@ -32,6 +32,17 @@ export default function PaperTradingPanel({ defaultSymbol = "BTCUSDT" }) {
     setBusy(true);
     try { setSnapshot(await resetPaperAccount({ initial_balance: 10000, reason: "Manual reset from Paper Desk" })); setResult(null); setError(""); }
     catch (requestError) { setError(requestError.message); }
+    finally { setBusy(false); }
+  };
+  const changeBotRuntime = async (bot) => {
+    const pause = bot.runtime?.status !== "paused";
+    const reason = window.prompt(pause ? `Motivo para pausar ${bot.name} durante 24 horas:` : `Motivo para reanudar ${bot.name}:`);
+    if (!reason?.trim()) return;
+    setBusy(true);
+    try {
+      await setPaperBotRuntime(bot.id, { status: pause ? "paused" : "active", reason: reason.trim(), pause_minutes: pause ? 1440 : null });
+      await load();
+    } catch (requestError) { setError(requestError.message); }
     finally { setBusy(false); }
   };
 
@@ -79,12 +90,14 @@ export default function PaperTradingPanel({ defaultSymbol = "BTCUSDT" }) {
       <AuditTable title="Órdenes" columns={["id", "bot_id", "bot_version_id", "proposal_id", "symbol", "side", "quantity", "status", "fee", "rejection_reason"]} rows={snapshot.orders || []} />
       <AuditTable title="Fills" columns={["id", "order_id", "symbol", "side", "quantity", "price", "fee", "filled_at"]} rows={snapshot.fills || []} />
       <AuditTable title="Ledger" columns={["id", "event_type", "reference_id", "symbol", "cash_delta", "realized_pnl_delta", "cash_balance", "created_at"]} rows={snapshot.ledger || []} />
+      <AuditTable title="Bot runtime events" columns={["id", "bot_id", "event_type", "previous_status", "new_status", "reason", "paused_until", "created_at"]} rows={snapshot.bot_runtime_events || []} />
     </section>}
 
     {activeTab === "bots" && <section className="exchange-panel paper-bot-performance">
       <div className="exchange-panel-head compact"><div><p className="eyebrow">Bot ROI profiles</p><h2>Rendimiento atribuido por bot</h2></div><span>FILLS + MARK TO MARKET</span></div>
       <div className="paper-bot-grid">{snapshot.bot_performance.map((bot) => <article key={bot.id} className={`${bot.paper_status} risk-${bot.risk_budget?.status || "clear"}`}>
         <div className="paper-bot-head"><div><span>BOT #{bot.id}</span><strong>{bot.name}</strong></div><b className={bot.roi_pct >= 0 ? "positive" : "negative"}>{bot.roi_pct >= 0 ? "+" : ""}{Number(bot.roi_pct).toFixed(2)}%</b></div>
+        <div className={`paper-bot-runtime ${bot.runtime?.status || "active"}`}><div><small>Runtime</small><strong>{bot.runtime?.status?.toUpperCase() || "ACTIVE"}</strong></div><button type="button" className="secondary" disabled={busy} onClick={() => changeBotRuntime(bot)}>{bot.runtime?.status === "paused" ? "Reanudar" : "Pausar 24h"}</button><small>{bot.runtime?.reason || "Sin override operativo"}{bot.runtime?.paused_until ? ` · hasta ${when(bot.runtime.paused_until)}` : ""}</small></div>
         <div className="paper-bot-metrics"><span><small>PnL</small><strong>{money(bot.pnl)}</strong></span><span><small>Capital</small><strong>{money(bot.deployed_capital)}</strong></span><span><small>Fills</small><strong>{bot.filled_orders}</strong></span><span><small>Rechazos</small><strong>{bot.rejected_orders}</strong></span></div>
         <div className={`paper-bot-risk ${bot.risk_budget?.status || "clear"}`}>
           <div><span>Presupuesto de pérdida diario</span><strong>{bot.risk_budget?.status?.toUpperCase() || "CLEAR"}</strong></div>

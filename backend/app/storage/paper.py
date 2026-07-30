@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from threading import Lock
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from backend.app.storage.risk import get_risk_profile, resolve_risk_policy, validate_order_intent
 from backend.app.market.freshness import MAX_PRICE_DRIFT_PCT, PRICE_MAX_AGE_SECONDS, PROPOSAL_TTL_SECONDS
@@ -84,6 +84,78 @@ def bot_open_exposure_notional(connection, bot_id: int) -> float:
     return sum(float(row["quantity"]) * latest_price(connection, row["symbol"]) for row in rows)
 
 
+def bot_runtime_state(connection, bot_id: int) -> dict:
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    connection.execute(
+        """INSERT OR IGNORE INTO paper_bot_runtime_state
+        (bot_id, status, reason, paused_until, created_at, updated_at)
+        VALUES (?, 'active', 'Default paper runtime state', NULL, ?, ?)""",
+        (bot_id, now_iso, now_iso),
+    )
+    row = dict(connection.execute(
+        "SELECT * FROM paper_bot_runtime_state WHERE bot_id = ?",
+        (bot_id,),
+    ).fetchone())
+    if row["status"] == "paused" and row["paused_until"]:
+        paused_until = datetime.fromisoformat(str(row["paused_until"]).replace("Z", "+00:00"))
+        if paused_until.tzinfo is None:
+            paused_until = paused_until.replace(tzinfo=timezone.utc)
+        if paused_until <= now:
+            reason = "Automatic resume after pause window expired"
+            connection.execute(
+                """UPDATE paper_bot_runtime_state
+                SET status = 'active', reason = ?, paused_until = NULL, updated_at = ?
+                WHERE bot_id = ?""",
+                (reason, now_iso, bot_id),
+            )
+            connection.execute(
+                """INSERT INTO paper_bot_runtime_events
+                (bot_id, event_type, previous_status, new_status, reason, paused_until, created_at)
+                VALUES (?, 'auto_resumed', 'paused', 'active', ?, NULL, ?)""",
+                (bot_id, reason, now_iso),
+            )
+            row = dict(connection.execute(
+                "SELECT * FROM paper_bot_runtime_state WHERE bot_id = ?",
+                (bot_id,),
+            ).fetchone())
+    row["entry_blocked"] = row["status"] == "paused"
+    return row
+
+
+def set_bot_runtime_state(bot_id: int, status: str, reason: str, pause_minutes: int | None = None) -> dict:
+    initialize_database()
+    bot_id = int(bot_id)
+    status = str(status).strip().lower()
+    clean_reason = str(reason).strip()
+    if status not in {"active", "paused"}:
+        raise ValueError("Paper bot runtime status must be active or paused")
+    if len(clean_reason) < 3:
+        raise ValueError("An auditable reason is required")
+    if pause_minutes is not None and not 1 <= int(pause_minutes) <= 43_200:
+        raise ValueError("Pause minutes must be between 1 and 43,200")
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    paused_until = (now + timedelta(minutes=int(pause_minutes))).isoformat() if status == "paused" and pause_minutes else None
+    with connect() as connection:
+        if not connection.execute("SELECT 1 FROM bots WHERE id = ?", (bot_id,)).fetchone():
+            raise ValueError(f"Bot {bot_id} does not exist")
+        previous = bot_runtime_state(connection, bot_id)
+        connection.execute(
+            """UPDATE paper_bot_runtime_state
+            SET status = ?, reason = ?, paused_until = ?, updated_at = ?
+            WHERE bot_id = ?""",
+            (status, clean_reason, paused_until, now_iso, bot_id),
+        )
+        connection.execute(
+            """INSERT INTO paper_bot_runtime_events
+            (bot_id, event_type, previous_status, new_status, reason, paused_until, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (bot_id, "paused" if status == "paused" else "resumed", previous["status"], status, clean_reason, paused_until, now_iso),
+        )
+        return bot_runtime_state(connection, bot_id)
+
+
 def bot_performance(connection, session_started_at: str, account_equity: float) -> list[dict]:
     bots = [dict(row) for row in connection.execute(
         "SELECT id, name, base_symbol, timeframe, risk_profile, status FROM bots ORDER BY id DESC"
@@ -138,7 +210,8 @@ def bot_performance(connection, session_started_at: str, account_equity: float) 
         capital_used = open_value
         capital_usage_pct = (capital_used / capital_budget) * 100 if capital_budget else 100.0
         highest_usage_pct = max(daily_loss_usage_pct, capital_usage_pct)
-        risk_status = "blocked" if highest_usage_pct >= 100 else "warning" if highest_usage_pct >= 80 else "clear"
+        runtime = bot_runtime_state(connection, bot["id"])
+        risk_status = "blocked" if runtime["entry_blocked"] or highest_usage_pct >= 100 else "warning" if highest_usage_pct >= 80 else "clear"
         results.append({
             **bot,
             "paper_status": "activity" if orders else "no_activity",
@@ -152,6 +225,7 @@ def bot_performance(connection, session_started_at: str, account_equity: float) 
             "started_at": orders[0]["created_at"] if orders else None,
             "last_activity_at": orders[-1]["created_at"] if orders else None,
             "open_positions": open_positions,
+            "runtime": runtime,
             "risk_budget": {
                 "status": risk_status,
                 "daily_realized_pnl": daily_realized_pnl,
@@ -312,6 +386,10 @@ def account_snapshot() -> dict:
             (account["created_at"],),
         ).fetchall()]
         performance = bot_performance(connection, account["created_at"], equity)
+        runtime_events = [dict(row) for row in connection.execute(
+            """SELECT * FROM paper_bot_runtime_events
+            ORDER BY id DESC LIMIT 50"""
+        ).fetchall()]
     risk_profile = get_risk_profile(audit_limit=1)
     protections = {
         "risk_required": True,
@@ -325,7 +403,7 @@ def account_snapshot() -> dict:
         "execution_serialization": "single_process_lock",
         "live_execution": "blocked",
     }
-    return {"account": account, "equity": equity, "market_value": market_value, "unrealized_pnl": unrealized_pnl, "daily_realized_pnl": daily_realized, "drawdown_pct": abs(drawdown), "positions": positions, "allocations": allocations, "proposals": proposals, "orders": orders, "fills": fills, "ledger": ledger, "execution_intents": execution_intents, "bot_performance": performance, "protections": protections, "mode": "paper", "live_execution": "blocked"}
+    return {"account": account, "equity": equity, "market_value": market_value, "unrealized_pnl": unrealized_pnl, "daily_realized_pnl": daily_realized, "drawdown_pct": abs(drawdown), "positions": positions, "allocations": allocations, "proposals": proposals, "orders": orders, "fills": fills, "ledger": ledger, "execution_intents": execution_intents, "bot_performance": performance, "bot_runtime_events": runtime_events, "protections": protections, "mode": "paper", "live_execution": "blocked"}
 
 
 def reconcile_paper_runtime(stale_after_seconds: int = 60) -> dict:
@@ -442,6 +520,7 @@ def _execute_market_intent_serialized(intent: OrderIntent) -> dict:
             raise ValueError(f"Bot {bot_id} does not exist")
         price = latest_price(connection, symbol)
         bot_exposure_notional = bot_open_exposure_notional(connection, bot_id) if bot_id is not None else None
+        runtime = bot_runtime_state(connection, bot_id) if bot_id is not None else None
     notional = price * quantity
     existing_position = next((item for item in snapshot["positions"] if item["symbol"] == symbol), None)
     existing_exposure_notional = float(existing_position["market_value"]) if existing_position else 0.0
@@ -463,6 +542,9 @@ def _execute_market_intent_serialized(intent: OrderIntent) -> dict:
         "current_exposure_notional": existing_exposure_notional,
         "account_current_exposure_notional": existing_exposure_notional,
         "bot_current_exposure_notional": bot_exposure_notional,
+        "bot_runtime_status": runtime["status"] if runtime else None,
+        "bot_runtime_reason": runtime["reason"] if runtime else None,
+        "bot_paused_until": runtime["paused_until"] if runtime else None,
         "last_loss_at": last_loss_at,
         "reduces_exposure": side == "sell",
     })

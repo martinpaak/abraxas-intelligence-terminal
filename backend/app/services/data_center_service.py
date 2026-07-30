@@ -88,6 +88,8 @@ SOURCE_CATALOG = [
             "simulated_positions",
             "simulated_fills",
             "simulated_ledger",
+            "paper_bot_runtime_state",
+            "paper_bot_runtime_events",
             "exchange_source_health",
             "execution_intents",
             "liquidity_sweep_evaluations",
@@ -409,6 +411,8 @@ DATASET_CATALOG = [
             ("simulated_position_allocations", "Asignaciones contables por bot, version y estrategia para PnL y protecciones exactas."),
             ("simulated_fills", "Fills market simulados con precio real persistido y comision."),
             ("simulated_ledger", "Ledger de caja y eventos de la cuenta paper."),
+            ("paper_bot_runtime_state", "Estado operativo activo o pausado de cada bot paper."),
+            ("paper_bot_runtime_events", "Historial auditable de pausas y reanudaciones por bot."),
         ]
     ],
     *[

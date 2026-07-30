@@ -7,7 +7,7 @@ from pathlib import Path
 
 from backend.app.services.data_center_service import get_dataset_preview
 from backend.app.storage import sqlite as storage_sqlite
-from backend.app.storage.paper import account_snapshot, place_market_order
+from backend.app.storage.paper import account_snapshot, place_market_order, set_bot_runtime_state
 from backend.app.storage.risk import (
     archive_risk_policy,
     list_risk_policies,
@@ -176,6 +176,34 @@ class RiskPolicyTests(unittest.TestCase):
         self.assertTrue(account_check["passed"])
         self.assertGreater(rejected["risk"]["metrics"]["bot_position_pct"], 5)
         self.assertLess(rejected["risk"]["metrics"]["account_position_pct"], 10)
+
+    def test_paused_bot_blocks_entries_but_allows_close_and_is_auditable(self) -> None:
+        opened = place_market_order({"symbol": "BTCUSDT", "side": "buy", "quantity": 0.001, "bot_id": 1})
+        self.assertEqual(opened["status"], "filled")
+        paused = set_bot_runtime_state(1, "paused", "Operator review after anomaly", pause_minutes=60)
+        self.assertEqual(paused["status"], "paused")
+        self.assertTrue(paused["entry_blocked"])
+
+        rejected = place_market_order({"symbol": "BTCUSDT", "side": "buy", "quantity": 0.001, "bot_id": 1})
+        self.assertEqual(rejected["status"], "rejected")
+        runtime_check = next(check for check in rejected["risk"]["checks"] if check["code"] == "bot_runtime")
+        self.assertFalse(runtime_check["passed"])
+
+        closed = place_market_order({"symbol": "BTCUSDT", "side": "sell", "quantity": 0.001, "bot_id": 1})
+        self.assertEqual(closed["status"], "filled")
+        close_check = next(check for check in closed["risk"]["checks"] if check["code"] == "bot_runtime")
+        self.assertTrue(close_check["passed"])
+
+        resumed = set_bot_runtime_state(1, "active", "Operator review completed")
+        self.assertEqual(resumed["status"], "active")
+        reopened = place_market_order({"symbol": "BTCUSDT", "side": "buy", "quantity": 0.001, "bot_id": 1})
+        self.assertEqual(reopened["status"], "filled")
+        snapshot = account_snapshot()
+        runtime = next(item["runtime"] for item in snapshot["bot_performance"] if item["id"] == 1)
+        self.assertEqual(runtime["status"], "active")
+        self.assertEqual([event["event_type"] for event in snapshot["bot_runtime_events"][:2]], ["resumed", "paused"])
+        self.assertEqual(len(get_dataset_preview("paper_bot_runtime_state", 10)["rows"]), 1)
+        self.assertEqual(len(get_dataset_preview("paper_bot_runtime_events", 10)["rows"]), 2)
 
 
 if __name__ == "__main__":

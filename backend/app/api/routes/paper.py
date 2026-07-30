@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from backend.app.storage.paper import account_snapshot, place_market_order, reconcile_paper_runtime, reset_account, update_position_protection
+from backend.app.storage.paper import account_snapshot, place_market_order, reconcile_paper_runtime, reset_account, set_bot_runtime_state, update_position_protection
 
 router = APIRouter(prefix="/api/paper", tags=["paper-trading"])
 
@@ -24,6 +24,12 @@ class PaperProtectionRequest(BaseModel):
     stop_loss_price: float | None = Field(default=None, gt=0)
     take_profit_price: float | None = Field(default=None, gt=0)
     trailing_distance_pct: float | None = Field(default=None, gt=0, le=50)
+
+
+class PaperBotRuntimeRequest(BaseModel):
+    status: str = Field(pattern="^(active|paused)$")
+    reason: str = Field(min_length=3, max_length=500)
+    pause_minutes: int | None = Field(default=None, ge=1, le=43_200)
 
 
 def values(model: BaseModel) -> dict:
@@ -52,6 +58,14 @@ def paper_reset(payload: PaperResetRequest) -> dict:
 @router.post("/reconcile")
 def paper_reconcile() -> dict:
     return reconcile_paper_runtime()
+
+
+@router.patch("/bots/{bot_id}/runtime")
+def paper_bot_runtime(payload: PaperBotRuntimeRequest, bot_id: int) -> dict:
+    try:
+        return set_bot_runtime_state(bot_id, **values(payload))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.patch("/allocations/{allocation_id}/protection")

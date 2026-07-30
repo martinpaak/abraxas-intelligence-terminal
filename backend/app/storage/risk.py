@@ -367,6 +367,9 @@ def validate_order_intent(payload: dict, *, persist: bool = True) -> dict:
     daily_pnl = float(payload["daily_pnl"])
     account_daily_pnl = float(payload.get("account_daily_pnl", daily_pnl))
     bot_daily_pnl = float(payload.get("bot_daily_pnl", daily_pnl)) if bot_id is not None else None
+    bot_runtime_status = str(payload.get("bot_runtime_status") or "active").strip().lower()
+    bot_runtime_reason = payload.get("bot_runtime_reason")
+    bot_paused_until = payload.get("bot_paused_until")
     current_drawdown_pct = float(payload["current_drawdown_pct"])
 
     with connect() as connection:
@@ -374,6 +377,21 @@ def validate_order_intent(payload: dict, *, persist: bool = True) -> dict:
         account_limits, account_policy_resolution = _resolve_risk_limits(connection, account_id, None)
         limits, policy_resolution = _resolve_risk_limits(connection, account_id, bot_id)
         state = dict(connection.execute("SELECT * FROM risk_state WHERE id = 1").fetchone())
+        if bot_id is not None and payload.get("bot_runtime_status") is None:
+            runtime_row = connection.execute(
+                "SELECT status, reason, paused_until FROM paper_bot_runtime_state WHERE bot_id = ?",
+                (bot_id,),
+            ).fetchone()
+            if runtime_row:
+                bot_runtime_status = runtime_row["status"]
+                bot_runtime_reason = runtime_row["reason"]
+                bot_paused_until = runtime_row["paused_until"]
+                if bot_runtime_status == "paused" and bot_paused_until:
+                    pause_end = datetime.fromisoformat(str(bot_paused_until).replace("Z", "+00:00"))
+                    if pause_end.tzinfo is None:
+                        pause_end = pause_end.replace(tzinfo=timezone.utc)
+                    if pause_end <= now:
+                        bot_runtime_status = "active"
 
         reduces_exposure = bool(payload.get("reduces_exposure"))
         projected_account_exposure = max(0.0, account_exposure_notional - requested_notional) if reduces_exposure else account_exposure_notional + requested_notional
@@ -400,6 +418,9 @@ def validate_order_intent(payload: dict, *, persist: bool = True) -> dict:
         mode_allowed = mode in {"validation", "paper", "spot"}
         check("mode", mode_allowed, f"{mode.title()} mode allowed" if mode_allowed else "Live mode is blocked")
         check("side", side == "long", "Long intent supported" if side == "long" else "Only long intents are supported in this phase")
+        bot_runtime_allowed = reduces_exposure or bot_id is None or bot_runtime_status == "active"
+        runtime_detail = "Close-only reduction allowed while bot is paused" if reduces_exposure and bot_runtime_status == "paused" else ("Bot runtime active" if bot_runtime_allowed else f"Bot runtime paused: {bot_runtime_reason or 'operator control'}")
+        check("bot_runtime", bot_runtime_allowed, runtime_detail)
         symbol_allowed = reduces_exposure or symbol in limits["symbol_whitelist"]
         check(
             "symbol_whitelist",
@@ -453,6 +474,8 @@ def validate_order_intent(payload: dict, *, persist: bool = True) -> dict:
                 "daily_loss_pct": round(account_daily_loss_pct, 4),
                 "account_daily_loss_pct": round(account_daily_loss_pct, 4),
                 "bot_daily_loss_pct": round(bot_daily_loss_pct, 4) if bot_daily_loss_pct is not None else None,
+                "bot_runtime_status": bot_runtime_status if bot_id is not None else None,
+                "bot_paused_until": bot_paused_until if bot_id is not None else None,
                 "current_drawdown_pct": round(current_drawdown_pct, 4),
                 "cooldown_remaining_minutes": cooldown_remaining,
                 "close_only": reduces_exposure,
@@ -464,7 +487,12 @@ def validate_order_intent(payload: dict, *, persist: bool = True) -> dict:
             "evaluated_at": now.isoformat(),
             "execution_performed": False,
         }
-        normalized_request = {**payload, "symbol": symbol, "mode": mode, "side": side}
+        normalized_request = {
+            **payload, "symbol": symbol, "mode": mode, "side": side,
+            "bot_runtime_status": bot_runtime_status if bot_id is not None else None,
+            "bot_runtime_reason": bot_runtime_reason if bot_id is not None else None,
+            "bot_paused_until": bot_paused_until if bot_id is not None else None,
+        }
         if persist:
             cursor = connection.execute(
                 """

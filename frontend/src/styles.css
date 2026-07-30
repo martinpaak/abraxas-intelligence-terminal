@@ -2065,6 +2065,14 @@ h2 {
 .paper-bot-head > div { display: grid; gap: 5px; }
 .paper-bot-head span, .paper-bot-grid time { color: #788691; font-size: 10px; }
 .paper-bot-head b { font-size: 19px; }
+.paper-bot-runtime { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 7px; padding: 9px; border: 1px solid #293640; border-radius: 6px; background: #0b1218; }
+.paper-bot-runtime > div { display: grid; gap: 3px; }
+.paper-bot-runtime small { color: #788691; font-size: 9px; text-transform: uppercase; letter-spacing: .05em; }
+.paper-bot-runtime > small { grid-column: 1 / -1; text-transform: none; line-height: 1.4; }
+.paper-bot-runtime strong { color: #47d9aa; font-size: 11px; }
+.paper-bot-runtime.paused { border-color: rgba(255,91,111,.48); background: #181014; }
+.paper-bot-runtime.paused strong { color: #ff6f80; }
+.paper-bot-runtime button { padding: 7px 9px; font-size: 10px; }
 .paper-bot-metrics { display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; }
 .paper-bot-metrics span { padding: 8px; border-radius: 5px; background: #0b1218; display: grid; gap: 4px; }
 .paper-bot-metrics small { color: #788691; text-transform: uppercase; font-size: 9px; }
