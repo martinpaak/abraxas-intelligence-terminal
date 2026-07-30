@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { getPaperAccount, placePaperOrder, resetPaperAccount, setPaperBotRuntime } from "../../api/client.js";
+import { getPaperAccount, placePaperOrder, resetPaperAccount, setPaperBotCircuitBreaker, setPaperBotRuntime } from "../../api/client.js";
 
 const money = (value) => Number(value || 0).toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 2 });
 const when = (value) => value ? new Date(value).toLocaleString() : "--";
@@ -41,6 +41,21 @@ export default function PaperTradingPanel({ defaultSymbol = "BTCUSDT" }) {
     setBusy(true);
     try {
       await setPaperBotRuntime(bot.id, { status: pause ? "paused" : "active", reason: reason.trim(), pause_minutes: pause ? 1440 : null });
+      await load();
+    } catch (requestError) { setError(requestError.message); }
+    finally { setBusy(false); }
+  };
+  const toggleCircuitBreaker = async (bot) => {
+    const config = bot.circuit_breaker?.config || {};
+    setBusy(true);
+    try {
+      await setPaperBotCircuitBreaker(bot.id, {
+        enabled: !config.enabled,
+        max_consecutive_losses: config.max_consecutive_losses || 3,
+        max_rejections: config.max_rejections || 5,
+        rejection_window_minutes: config.rejection_window_minutes || 15,
+        pause_minutes: config.pause_minutes || 60,
+      });
       await load();
     } catch (requestError) { setError(requestError.message); }
     finally { setBusy(false); }
@@ -91,6 +106,7 @@ export default function PaperTradingPanel({ defaultSymbol = "BTCUSDT" }) {
       <AuditTable title="Fills" columns={["id", "order_id", "symbol", "side", "quantity", "price", "fee", "filled_at"]} rows={snapshot.fills || []} />
       <AuditTable title="Ledger" columns={["id", "event_type", "reference_id", "symbol", "cash_delta", "realized_pnl_delta", "cash_balance", "created_at"]} rows={snapshot.ledger || []} />
       <AuditTable title="Bot runtime events" columns={["id", "bot_id", "event_type", "previous_status", "new_status", "reason", "paused_until", "created_at"]} rows={snapshot.bot_runtime_events || []} />
+      <AuditTable title="Circuit breaker events" columns={["id", "bot_id", "trigger_code", "observed_value", "threshold_value", "action", "created_at"]} rows={snapshot.bot_circuit_events || []} />
     </section>}
 
     {activeTab === "bots" && <section className="exchange-panel paper-bot-performance">
@@ -98,6 +114,13 @@ export default function PaperTradingPanel({ defaultSymbol = "BTCUSDT" }) {
       <div className="paper-bot-grid">{snapshot.bot_performance.map((bot) => <article key={bot.id} className={`${bot.paper_status} risk-${bot.risk_budget?.status || "clear"}`}>
         <div className="paper-bot-head"><div><span>BOT #{bot.id}</span><strong>{bot.name}</strong></div><b className={bot.roi_pct >= 0 ? "positive" : "negative"}>{bot.roi_pct >= 0 ? "+" : ""}{Number(bot.roi_pct).toFixed(2)}%</b></div>
         <div className={`paper-bot-runtime ${bot.runtime?.status || "active"}`}><div><small>Runtime</small><strong>{bot.runtime?.status?.toUpperCase() || "ACTIVE"}</strong></div><button type="button" className="secondary" disabled={busy} onClick={() => changeBotRuntime(bot)}>{bot.runtime?.status === "paused" ? "Reanudar" : "Pausar 24h"}</button><small>{bot.runtime?.reason || "Sin override operativo"}{bot.runtime?.paused_until ? ` · hasta ${when(bot.runtime.paused_until)}` : ""}</small></div>
+        <div className={`paper-bot-circuit ${bot.circuit_breaker?.status || "armed"}`}>
+          <div><span>Circuit breaker</span><strong>{String(bot.circuit_breaker?.status || "armed").toUpperCase()}</strong></div>
+          <div><small>Pérdidas seguidas</small><b>{bot.circuit_breaker?.consecutive_losses || 0}/{bot.circuit_breaker?.config?.max_consecutive_losses || 3}</b></div>
+          <div><small>Rechazos / {bot.circuit_breaker?.config?.rejection_window_minutes || 15}m</small><b>{bot.circuit_breaker?.rejections_in_window || 0}/{bot.circuit_breaker?.config?.max_rejections || 5}</b></div>
+          <button type="button" className="secondary" disabled={busy} onClick={() => toggleCircuitBreaker(bot)}>{bot.circuit_breaker?.config?.enabled ? "Desarmar" : "Armar"}</button>
+          <small>Si dispara, pausa entradas {bot.circuit_breaker?.config?.pause_minutes || 60} min. Los cierres continúan permitidos.</small>
+        </div>
         <div className="paper-bot-metrics"><span><small>PnL</small><strong>{money(bot.pnl)}</strong></span><span><small>Capital</small><strong>{money(bot.deployed_capital)}</strong></span><span><small>Fills</small><strong>{bot.filled_orders}</strong></span><span><small>Rechazos</small><strong>{bot.rejected_orders}</strong></span></div>
         <div className={`paper-bot-risk ${bot.risk_budget?.status || "clear"}`}>
           <div><span>Presupuesto de pérdida diario</span><strong>{bot.risk_budget?.status?.toUpperCase() || "CLEAR"}</strong></div>

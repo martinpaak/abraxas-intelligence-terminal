@@ -7,7 +7,7 @@ from pathlib import Path
 
 from backend.app.services.data_center_service import get_dataset_preview
 from backend.app.storage import sqlite as storage_sqlite
-from backend.app.storage.paper import account_snapshot, place_market_order, set_bot_runtime_state
+from backend.app.storage.paper import account_snapshot, place_market_order, set_bot_circuit_breaker, set_bot_runtime_state
 from backend.app.storage.risk import (
     archive_risk_policy,
     list_risk_policies,
@@ -204,6 +204,40 @@ class RiskPolicyTests(unittest.TestCase):
         self.assertEqual([event["event_type"] for event in snapshot["bot_runtime_events"][:2]], ["resumed", "paused"])
         self.assertEqual(len(get_dataset_preview("paper_bot_runtime_state", 10)["rows"]), 1)
         self.assertEqual(len(get_dataset_preview("paper_bot_runtime_events", 10)["rows"]), 2)
+
+    def test_rejection_burst_trips_auditable_bot_circuit_breaker(self) -> None:
+        configured = set_bot_circuit_breaker(1, {
+            "enabled": True,
+            "max_consecutive_losses": 3,
+            "max_rejections": 2,
+            "rejection_window_minutes": 15,
+            "pause_minutes": 30,
+        })
+        self.assertEqual(configured["max_rejections"], 2)
+        for _ in range(2):
+            rejected = place_market_order({"symbol": "BTCUSDT", "side": "sell", "quantity": 1, "bot_id": 1})
+            self.assertEqual(rejected["status"], "rejected")
+
+        snapshot = account_snapshot()
+        bot = next(item for item in snapshot["bot_performance"] if item["id"] == 1)
+        self.assertEqual(bot["circuit_breaker"]["status"], "tripped")
+        self.assertEqual(bot["circuit_breaker"]["rejections_in_window"], 2)
+        self.assertEqual(bot["runtime"]["status"], "paused")
+        self.assertIn("rejection_burst", bot["runtime"]["reason"])
+
+        blocked = place_market_order({"symbol": "BTCUSDT", "side": "buy", "quantity": 0.001, "bot_id": 1})
+        self.assertEqual(blocked["status"], "rejected")
+        runtime_check = next(check for check in blocked["risk"]["checks"] if check["code"] == "bot_runtime")
+        self.assertFalse(runtime_check["passed"])
+        self.assertEqual(snapshot["bot_circuit_events"][0]["trigger_code"], "rejection_burst")
+        self.assertEqual(len(get_dataset_preview("paper_bot_circuit_breakers", 10)["rows"]), 1)
+        self.assertEqual(len(get_dataset_preview("paper_bot_circuit_events", 10)["rows"]), 1)
+        set_bot_runtime_state(1, "active", "Operator reviewed the rejection burst")
+        rearmed = account_snapshot()
+        bot = next(item for item in rearmed["bot_performance"] if item["id"] == 1)
+        self.assertEqual(bot["runtime"]["status"], "active")
+        self.assertEqual(bot["circuit_breaker"]["status"], "armed")
+        self.assertEqual(len(rearmed["bot_circuit_events"]), 1)
 
 
 if __name__ == "__main__":

@@ -2073,6 +2073,17 @@ h2 {
 .paper-bot-runtime.paused { border-color: rgba(255,91,111,.48); background: #181014; }
 .paper-bot-runtime.paused strong { color: #ff6f80; }
 .paper-bot-runtime button { padding: 7px 9px; font-size: 10px; }
+.paper-bot-circuit { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; padding: 10px; border: 1px solid rgba(71,217,170,.3); border-radius: 6px; background: #0a1517; }
+.paper-bot-circuit > div { display: flex; justify-content: space-between; gap: 8px; }
+.paper-bot-circuit > div:first-child, .paper-bot-circuit > button, .paper-bot-circuit > small { grid-column: 1 / -1; }
+.paper-bot-circuit span, .paper-bot-circuit small { color: #82929a; font-size: 9px; text-transform: uppercase; letter-spacing: .05em; }
+.paper-bot-circuit strong { color: #47d9aa; font-size: 10px; }
+.paper-bot-circuit b { color: #d7e0e5; font-size: 10px; }
+.paper-bot-circuit button { padding: 7px 9px; font-size: 10px; }
+.paper-bot-circuit.tripped { border-color: rgba(255,91,111,.55); background: #181014; }
+.paper-bot-circuit.tripped strong { color: #ff6f80; }
+.paper-bot-circuit.disabled { border-color: #293640; background: #0b1218; }
+.paper-bot-circuit.disabled strong { color: #788691; }
 .paper-bot-metrics { display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; }
 .paper-bot-metrics span { padding: 8px; border-radius: 5px; background: #0b1218; display: grid; gap: 4px; }
 .paper-bot-metrics small { color: #788691; text-transform: uppercase; font-size: 9px; }

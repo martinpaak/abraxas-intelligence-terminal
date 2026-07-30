@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from backend.app.storage.paper import account_snapshot, place_market_order, reconcile_paper_runtime, reset_account, set_bot_runtime_state, update_position_protection
+from backend.app.storage.paper import account_snapshot, place_market_order, reconcile_paper_runtime, reset_account, set_bot_circuit_breaker, set_bot_runtime_state, update_position_protection
 
 router = APIRouter(prefix="/api/paper", tags=["paper-trading"])
 
@@ -30,6 +30,14 @@ class PaperBotRuntimeRequest(BaseModel):
     status: str = Field(pattern="^(active|paused)$")
     reason: str = Field(min_length=3, max_length=500)
     pause_minutes: int | None = Field(default=None, ge=1, le=43_200)
+
+
+class PaperBotCircuitBreakerRequest(BaseModel):
+    enabled: bool = True
+    max_consecutive_losses: int = Field(default=3, ge=1, le=100)
+    max_rejections: int = Field(default=5, ge=1, le=1000)
+    rejection_window_minutes: int = Field(default=15, ge=1, le=1440)
+    pause_minutes: int = Field(default=60, ge=1, le=43_200)
 
 
 def values(model: BaseModel) -> dict:
@@ -64,6 +72,14 @@ def paper_reconcile() -> dict:
 def paper_bot_runtime(payload: PaperBotRuntimeRequest, bot_id: int) -> dict:
     try:
         return set_bot_runtime_state(bot_id, **values(payload))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/bots/{bot_id}/circuit-breaker")
+def paper_bot_circuit_breaker(payload: PaperBotCircuitBreakerRequest, bot_id: int) -> dict:
+    try:
+        return set_bot_circuit_breaker(bot_id, values(payload))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

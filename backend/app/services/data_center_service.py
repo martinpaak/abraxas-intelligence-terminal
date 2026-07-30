@@ -90,6 +90,8 @@ SOURCE_CATALOG = [
             "simulated_ledger",
             "paper_bot_runtime_state",
             "paper_bot_runtime_events",
+            "paper_bot_circuit_breakers",
+            "paper_bot_circuit_events",
             "exchange_source_health",
             "execution_intents",
             "liquidity_sweep_evaluations",
@@ -413,6 +415,8 @@ DATASET_CATALOG = [
             ("simulated_ledger", "Ledger de caja y eventos de la cuenta paper."),
             ("paper_bot_runtime_state", "Estado operativo activo o pausado de cada bot paper."),
             ("paper_bot_runtime_events", "Historial auditable de pausas y reanudaciones por bot."),
+            ("paper_bot_circuit_breakers", "Configuracion persistida de protecciones automaticas por bot paper."),
+            ("paper_bot_circuit_events", "Disparos auditables de breakers por perdidas consecutivas o rafagas de rechazo."),
         ]
     ],
     *[

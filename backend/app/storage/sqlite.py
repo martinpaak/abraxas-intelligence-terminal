@@ -915,6 +915,33 @@ CREATE TABLE IF NOT EXISTS paper_bot_runtime_events (
 CREATE INDEX IF NOT EXISTS idx_paper_bot_runtime_events_bot_time
 ON paper_bot_runtime_events(bot_id, created_at);
 
+CREATE TABLE IF NOT EXISTS paper_bot_circuit_breakers (
+    bot_id INTEGER PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    max_consecutive_losses INTEGER NOT NULL DEFAULT 3 CHECK (max_consecutive_losses BETWEEN 1 AND 100),
+    max_rejections INTEGER NOT NULL DEFAULT 5 CHECK (max_rejections BETWEEN 1 AND 1000),
+    rejection_window_minutes INTEGER NOT NULL DEFAULT 15 CHECK (rejection_window_minutes BETWEEN 1 AND 1440),
+    pause_minutes INTEGER NOT NULL DEFAULT 60 CHECK (pause_minutes BETWEEN 1 AND 43200),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(bot_id) REFERENCES bots(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS paper_bot_circuit_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id INTEGER NOT NULL,
+    trigger_code TEXT NOT NULL,
+    observed_value REAL NOT NULL,
+    threshold_value REAL NOT NULL,
+    evidence_json TEXT NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('paused', 'observed')),
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(bot_id) REFERENCES bots(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_paper_bot_circuit_events_bot_time
+ON paper_bot_circuit_events(bot_id, created_at);
+
 CREATE TABLE IF NOT EXISTS exchange_source_health (
     exchange_id TEXT NOT NULL,
     endpoint TEXT NOT NULL,

@@ -156,6 +156,153 @@ def set_bot_runtime_state(bot_id: int, status: str, reason: str, pause_minutes: 
         return bot_runtime_state(connection, bot_id)
 
 
+def circuit_breaker_config(connection, bot_id: int) -> dict:
+    now = utc_now_iso()
+    connection.execute(
+        """INSERT OR IGNORE INTO paper_bot_circuit_breakers
+        (bot_id, enabled, max_consecutive_losses, max_rejections, rejection_window_minutes,
+         pause_minutes, created_at, updated_at)
+        VALUES (?, 1, 3, 5, 15, 60, ?, ?)""",
+        (bot_id, now, now),
+    )
+    row = dict(connection.execute(
+        "SELECT * FROM paper_bot_circuit_breakers WHERE bot_id = ?",
+        (bot_id,),
+    ).fetchone())
+    row["enabled"] = bool(row["enabled"])
+    return row
+
+
+def set_bot_circuit_breaker(bot_id: int, payload: dict) -> dict:
+    initialize_database()
+    bot_id = int(bot_id)
+    values = {
+        "enabled": 1 if bool(payload.get("enabled", True)) else 0,
+        "max_consecutive_losses": int(payload.get("max_consecutive_losses", 3)),
+        "max_rejections": int(payload.get("max_rejections", 5)),
+        "rejection_window_minutes": int(payload.get("rejection_window_minutes", 15)),
+        "pause_minutes": int(payload.get("pause_minutes", 60)),
+    }
+    if not 1 <= values["max_consecutive_losses"] <= 100:
+        raise ValueError("Consecutive loss threshold must be between 1 and 100")
+    if not 1 <= values["max_rejections"] <= 1000:
+        raise ValueError("Rejection threshold must be between 1 and 1,000")
+    if not 1 <= values["rejection_window_minutes"] <= 1440:
+        raise ValueError("Rejection window must be between 1 and 1,440 minutes")
+    if not 1 <= values["pause_minutes"] <= 43_200:
+        raise ValueError("Circuit pause must be between 1 and 43,200 minutes")
+    now = utc_now_iso()
+    with connect() as connection:
+        if not connection.execute("SELECT 1 FROM bots WHERE id = ?", (bot_id,)).fetchone():
+            raise ValueError(f"Bot {bot_id} does not exist")
+        circuit_breaker_config(connection, bot_id)
+        connection.execute(
+            """UPDATE paper_bot_circuit_breakers
+            SET enabled = ?, max_consecutive_losses = ?, max_rejections = ?,
+                rejection_window_minutes = ?, pause_minutes = ?, updated_at = ?
+            WHERE bot_id = ?""",
+            (*values.values(), now, bot_id),
+        )
+        return circuit_breaker_config(connection, bot_id)
+
+
+def consecutive_bot_losses(connection, bot_id: int) -> int:
+    rows = connection.execute(
+        """SELECT ledger.realized_pnl_delta
+        FROM simulated_ledger AS ledger
+        JOIN simulated_fills AS fill
+          ON ledger.event_type = 'market_fill' AND ledger.reference_id = fill.id
+        JOIN simulated_orders AS paper_order ON paper_order.id = fill.order_id
+        WHERE paper_order.bot_id = ? AND ledger.realized_pnl_delta != 0
+        ORDER BY ledger.created_at DESC, ledger.id DESC LIMIT 100""",
+        (bot_id,),
+    ).fetchall()
+    count = 0
+    for row in rows:
+        if float(row["realized_pnl_delta"]) >= 0:
+            break
+        count += 1
+    return count
+
+
+def evaluate_bot_circuit_breaker(connection, bot_id: int) -> dict:
+    config = circuit_breaker_config(connection, bot_id)
+    runtime = bot_runtime_state(connection, bot_id)
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=config["rejection_window_minutes"])).isoformat()
+    rejection_row = connection.execute(
+        """SELECT COUNT(*) AS value, MAX(id) AS latest_id FROM simulated_orders
+        WHERE bot_id = ? AND status = 'rejected' AND created_at >= ?
+          AND LOWER(COALESCE(rejection_reason, '')) NOT LIKE '%runtime paused%'""",
+        (bot_id, cutoff),
+    ).fetchone()
+    rejection_count = int(rejection_row["value"])
+    latest_loss_row = connection.execute(
+        """SELECT ledger.id FROM simulated_ledger AS ledger
+        JOIN simulated_fills AS fill
+          ON ledger.event_type = 'market_fill' AND ledger.reference_id = fill.id
+        JOIN simulated_orders AS paper_order ON paper_order.id = fill.order_id
+        WHERE paper_order.bot_id = ? AND ledger.realized_pnl_delta < 0
+        ORDER BY ledger.created_at DESC, ledger.id DESC LIMIT 1""",
+        (bot_id,),
+    ).fetchone()
+    loss_count = consecutive_bot_losses(connection, bot_id)
+    trigger = None
+    observed = 0
+    threshold = 0
+    evidence_id = None
+    if config["enabled"] and loss_count >= config["max_consecutive_losses"]:
+        trigger, observed, threshold, evidence_id = "consecutive_losses", loss_count, config["max_consecutive_losses"], latest_loss_row["id"]
+    elif config["enabled"] and rejection_count >= config["max_rejections"]:
+        trigger, observed, threshold, evidence_id = "rejection_burst", rejection_count, config["max_rejections"], rejection_row["latest_id"]
+    last_event = connection.execute(
+        """SELECT evidence_json FROM paper_bot_circuit_events
+        WHERE bot_id = ? AND trigger_code = ? ORDER BY id DESC LIMIT 1""",
+        (bot_id, trigger),
+    ).fetchone() if trigger else None
+    previous_evidence_id = None
+    if last_event:
+        try:
+            previous_evidence_id = json.loads(last_event["evidence_json"]).get("evidence_id")
+        except (TypeError, json.JSONDecodeError):
+            previous_evidence_id = None
+    is_new_evidence = evidence_id is not None and evidence_id != previous_evidence_id
+    if trigger and is_new_evidence and runtime["status"] == "active":
+        now = datetime.now(timezone.utc)
+        paused_until = (now + timedelta(minutes=config["pause_minutes"])).isoformat()
+        reason = f"Automatic circuit breaker: {trigger} ({observed}/{threshold})"
+        connection.execute(
+            """UPDATE paper_bot_runtime_state
+            SET status = 'paused', reason = ?, paused_until = ?, updated_at = ? WHERE bot_id = ?""",
+            (reason, paused_until, now.isoformat(), bot_id),
+        )
+        connection.execute(
+            """INSERT INTO paper_bot_runtime_events
+            (bot_id, event_type, previous_status, new_status, reason, paused_until, created_at)
+            VALUES (?, 'paused', 'active', 'paused', ?, ?, ?)""",
+            (bot_id, reason, paused_until, now.isoformat()),
+        )
+        connection.execute(
+            """INSERT INTO paper_bot_circuit_events
+            (bot_id, trigger_code, observed_value, threshold_value, evidence_json, action, created_at)
+            VALUES (?, ?, ?, ?, ?, 'paused', ?)""",
+            (bot_id, trigger, observed, threshold, json.dumps({
+                "consecutive_losses": loss_count,
+                "rejections_in_window": rejection_count,
+                "rejection_window_minutes": config["rejection_window_minutes"],
+                "pause_minutes": config["pause_minutes"],
+                "evidence_id": evidence_id,
+            }, sort_keys=True), now.isoformat()),
+        )
+        runtime = bot_runtime_state(connection, bot_id)
+    return {
+        "config": config,
+        "status": "tripped" if runtime["status"] == "paused" and str(runtime["reason"]).startswith("Automatic circuit breaker") else "armed" if config["enabled"] else "disabled",
+        "consecutive_losses": loss_count,
+        "rejections_in_window": rejection_count,
+        "runtime": runtime,
+    }
+
+
 def bot_performance(connection, session_started_at: str, account_equity: float) -> list[dict]:
     bots = [dict(row) for row in connection.execute(
         "SELECT id, name, base_symbol, timeframe, risk_profile, status FROM bots ORDER BY id DESC"
@@ -210,7 +357,8 @@ def bot_performance(connection, session_started_at: str, account_equity: float) 
         capital_used = open_value
         capital_usage_pct = (capital_used / capital_budget) * 100 if capital_budget else 100.0
         highest_usage_pct = max(daily_loss_usage_pct, capital_usage_pct)
-        runtime = bot_runtime_state(connection, bot["id"])
+        circuit_breaker = evaluate_bot_circuit_breaker(connection, bot["id"])
+        runtime = circuit_breaker["runtime"]
         risk_status = "blocked" if runtime["entry_blocked"] or highest_usage_pct >= 100 else "warning" if highest_usage_pct >= 80 else "clear"
         results.append({
             **bot,
@@ -226,6 +374,7 @@ def bot_performance(connection, session_started_at: str, account_equity: float) 
             "last_activity_at": orders[-1]["created_at"] if orders else None,
             "open_positions": open_positions,
             "runtime": runtime,
+            "circuit_breaker": circuit_breaker,
             "risk_budget": {
                 "status": risk_status,
                 "daily_realized_pnl": daily_realized_pnl,
@@ -390,6 +539,11 @@ def account_snapshot() -> dict:
             """SELECT * FROM paper_bot_runtime_events
             ORDER BY id DESC LIMIT 50"""
         ).fetchall()]
+        circuit_events = [dict(row) for row in connection.execute(
+            """SELECT * FROM paper_bot_circuit_events
+            WHERE created_at >= ? ORDER BY id DESC LIMIT 100""",
+            (account["created_at"],),
+        ).fetchall()]
     risk_profile = get_risk_profile(audit_limit=1)
     protections = {
         "risk_required": True,
@@ -403,7 +557,7 @@ def account_snapshot() -> dict:
         "execution_serialization": "single_process_lock",
         "live_execution": "blocked",
     }
-    return {"account": account, "equity": equity, "market_value": market_value, "unrealized_pnl": unrealized_pnl, "daily_realized_pnl": daily_realized, "drawdown_pct": abs(drawdown), "positions": positions, "allocations": allocations, "proposals": proposals, "orders": orders, "fills": fills, "ledger": ledger, "execution_intents": execution_intents, "bot_performance": performance, "bot_runtime_events": runtime_events, "protections": protections, "mode": "paper", "live_execution": "blocked"}
+    return {"account": account, "equity": equity, "market_value": market_value, "unrealized_pnl": unrealized_pnl, "daily_realized_pnl": daily_realized, "drawdown_pct": abs(drawdown), "positions": positions, "allocations": allocations, "proposals": proposals, "orders": orders, "fills": fills, "ledger": ledger, "execution_intents": execution_intents, "bot_performance": performance, "bot_runtime_events": runtime_events, "bot_circuit_events": circuit_events, "protections": protections, "mode": "paper", "live_execution": "blocked"}
 
 
 def reconcile_paper_runtime(stale_after_seconds: int = 60) -> dict:

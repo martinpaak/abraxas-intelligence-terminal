@@ -443,6 +443,10 @@ export function setPaperBotRuntime(botId, payload) {
   return request(`/api/paper/bots/${botId}/runtime`, { method: "PATCH", body: JSON.stringify(payload) });
 }
 
+export function setPaperBotCircuitBreaker(botId, payload) {
+  return request(`/api/paper/bots/${botId}/circuit-breaker`, { method: "PUT", body: JSON.stringify(payload) });
+}
+
 export function updatePaperProtection(allocationId, payload) {
   return request(`/api/paper/allocations/${allocationId}/protection`, { method: "PATCH", body: JSON.stringify(payload) });
 }
